@@ -3,9 +3,9 @@
 //!
 //! Six 40 px rows form a menu, a 60 px status band sits below them.
 //!
-//! * On entry and on **OK held 1 s** it runs the benchmark: full refresh, one 400×40
-//!   row, two far-apart rows as two calls, the same two rows as one window, the whole
-//!   screen as a partial. Each result appears in its row.
+//! * On entry it runs the benchmark: full refresh, one 400×40 row, two far-apart rows as
+//!   two calls, the same two rows as one window, the whole screen as a partial. Each
+//!   result appears in its row.
 //! * **Up / Down** move the highlight with one partial refresh of a window that holds
 //!   the old row, the new row and the status band. A partial refresh costs about the
 //!   same at any size (~0.77 s measured), so one big window beats several small ones.
@@ -15,7 +15,8 @@
 //! * The status band shows the last refresh and the number of partial refreshes since
 //!   the last full one. There is no automatic full refresh, so ghosting can be judged
 //!   after 8, 16, 32 … partials.
-//! * After 60 s without a press the screen gets one full refresh and the lab returns.
+//! * **OK held 1 s** leaves the lab, as do 60 s without a press. Either way the screen gets
+//!   one full refresh first, so the shadow matches a clean panel when the lab returns.
 
 use core::fmt::Write as _;
 
@@ -127,18 +128,6 @@ impl<'a, 'd> Buttons<'a, 'd> {
 }
 
 /// Wait up to `timeout` for a press.
-/// Wait up to `timeout` for `want`, ignoring other presses. True if it came.
-pub fn wait_for(buttons: &mut Buttons, delay: &Delay, timeout: Duration, want: Press) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if buttons.poll() == Some(want) {
-            return true;
-        }
-        delay.delay_millis(10);
-    }
-    false
-}
-
 pub fn wait_press(buttons: &mut Buttons, delay: &Delay, timeout: Duration) -> Option<Press> {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -201,11 +190,10 @@ pub fn run(
                 lab.draw_all(frame, false);
                 lab.partial(epd, frame, shadow, &[Rect::full()], "results");
             }
-            Some(Press::OkLong) => lab.bench(epd, frame, shadow),
-            None => break,
+            Some(Press::OkLong) | None => break,
         }
     }
-    info!("lab: idle, final full refresh");
+    info!("lab: leaving, final full refresh");
     lab.draw_all(frame, true);
     lab.full(epd, frame, shadow);
 }
@@ -323,12 +311,12 @@ impl Lab {
         Some(ms)
     }
 
-    fn draw_all(&self, frame: &mut MonoFrame, asleep: bool) {
+    fn draw_all(&self, frame: &mut MonoFrame, leaving: bool) {
         let _ = frame.clear(BinaryColor::Off);
         for i in 0..ROWS {
             self.draw_row(frame, i, i == self.sel);
         }
-        self.draw_status(frame, asleep.then_some("Asleep. OK wakes."));
+        self.draw_status(frame, leaving.then_some("Back to the menu."));
     }
 
     fn draw_row(&self, frame: &mut MonoFrame, i: usize, selected: bool) {
@@ -395,7 +383,11 @@ impl Lab {
         }
         let mut l2: heapless::String<48> = heapless::String::new();
         let _ = write!(l2, "Partials: {}", self.partials);
-        let _ = l2.push_str(if self.border { "  border" } else { "  inverted" });
+        let _ = l2.push_str(if self.border {
+            "  border"
+        } else {
+            "  inverted"
+        });
         let _ = Text::new(&l1, Point::new(10, top + 25), ink).draw(frame);
         let _ = Text::new(&l2, Point::new(10, top + 50), ink).draw(frame);
     }

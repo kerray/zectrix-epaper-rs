@@ -1,7 +1,9 @@
 //! When to use a partial refresh and when a full one (`docs/INTERACTIVE.md`, "Ghosting").
 //!
-//! * A new screen is always shown with a full refresh (the vendor UI does the same for
-//!   page changes).
+//! * A new screen is shown with a full refresh (the vendor UI does the same for page
+//!   changes), unless [`RefreshPolicy::with_partial_screens`] allows a partial one. On the
+//!   NOTE4 a partial refresh of the whole screen took 0.79 s against 1.24 s for a full one,
+//!   without the black/white flash, and ghosting was hard to see after many partials.
 //! * A change on the same screen is a partial refresh while the shadow is valid and fewer
 //!   than `max_partials` (default 8) partial refreshes happened since the last full one;
 //!   otherwise it is a full refresh.
@@ -32,6 +34,7 @@ pub enum RefreshKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefreshPolicy {
     max_partials: u16,
+    partial_screens: bool,
     partials: u16,
     shadow_valid: bool,
     /// The panel may not show a clean image: a partial was attempted or a full failed.
@@ -50,10 +53,18 @@ impl RefreshPolicy {
     pub const fn new(max_partials: u16) -> Self {
         Self {
             max_partials,
+            partial_screens: false,
             partials: 0,
             shadow_valid: false,
             unclean: false,
         }
+    }
+
+    /// Also show new screens with a partial refresh (still counted against
+    /// `max_partials`).
+    pub const fn with_partial_screens(mut self, on: bool) -> Self {
+        self.partial_screens = on;
+        self
     }
 
     /// The caller has a shadow that matches the panel (e.g. restored from RTC memory) and
@@ -68,6 +79,13 @@ impl RefreshPolicy {
     pub fn plan(&self, update: Update) -> RefreshKind {
         match update {
             Update::Change if self.shadow_valid && self.partials < self.max_partials => {
+                RefreshKind::Partial
+            }
+            Update::NewScreen
+                if self.partial_screens
+                    && self.shadow_valid
+                    && self.partials < self.max_partials =>
+            {
                 RefreshKind::Partial
             }
             _ => RefreshKind::Full,
@@ -143,6 +161,12 @@ mod tests {
     fn new_screen_is_always_full() {
         let mut p = RefreshPolicy::new(100);
         p.full_done(true);
+        assert_eq!(p.plan(Update::NewScreen), RefreshKind::Full);
+        let mut p = RefreshPolicy::new(1).with_partial_screens(true);
+        assert_eq!(p.plan(Update::NewScreen), RefreshKind::Full); // no shadow yet
+        p.full_done(true);
+        assert_eq!(p.plan(Update::NewScreen), RefreshKind::Partial);
+        p.partial_done(true);
         assert_eq!(p.plan(Update::NewScreen), RefreshKind::Full);
     }
 

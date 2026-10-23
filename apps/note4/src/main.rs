@@ -1,11 +1,17 @@
-//! NOTE4 (black/white) bring-up firmware.
+//! NOTE4 (black/white) firmware: an on-device menu driven by the three buttons.
 //!
-//! On every boot it latches power, reads the battery, draws a black/white test card
-//! with a status line and refreshes the panel. Unless the 30-minute timer woke it, it
-//! then waits 60 s for OK, which opens the partial-refresh lab ([`lab`],
-//! docs/INTERACTIVE.md). Then it switches the panel off and deep-sleeps. OK (GPIO0) or
-//! the timer wakes it again. The device keeps its power latch held; a real "power off"
-//! gesture is on the roadmap (docs/ROADMAP.md).
+//! * Reset or OK wakes it into the menu ([`zectrix_screen::menu`]). Up/Down move, OK opens
+//!   a submenu or runs the item, every submenu has a Back row on top, Up held goes back.
+//! * Each change is one partial refresh of whatever changed ([`zectrix_screen::Presenter`];
+//!   ~0.8 s on the NOTE4), with a full refresh after 16 partials.
+//! * After 60 s without a press the device shows a sleep screen (full refresh) and goes to
+//!   deep sleep; OK wakes it.
+//! * Down held 3 s switches it off (the power latch is released; on USB power it sleeps
+//!   instead).
+//!
+//! Lights, Calendar, Weather and Last answer are placeholders until the device fetches
+//! screens from a server (docs/INTERACTIVE.md, I3/I4). System holds local screens: device
+//! info, a button test and the partial-refresh lab ([`lab`]).
 
 #![no_std]
 #![no_main]
@@ -20,12 +26,9 @@ use core::fmt::Write as _;
 
 mod lab;
 
-use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
-    prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
-    text::Text,
+    pixelcolor::BinaryColor,
 };
 use esp_backtrace as _;
 use esp_hal::{
@@ -34,15 +37,20 @@ use esp_hal::{
     main,
     rtc_cntl::WakeupSource,
     spi::{
-        Mode,
+        Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
     },
-    time::{Duration, Rate},
+    time::{Duration, Instant, Rate},
 };
-use log::{error, info};
+use log::{error, info, warn};
 use ssd2683::{MonoFrame, Panel, Ssd2683, Timing};
 use static_cell::ConstStaticCell;
 use zectrix_board::power::{self, Battery, PowerLatch};
+use zectrix_screen::{
+    Button, Buttons, Event, Presenter, RefreshPolicy, Session, Shown, Update,
+    menu::{Item, Menu, Nav, Outcome},
+    view::{self, Label, Theme},
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -59,20 +67,244 @@ fn custom_halt() -> ! {
     power::halt_after_panic(PANIC_RETRY)
 }
 
-const WAKE_INTERVAL: Duration = Duration::from_secs(30 * 60);
-/// How long the test card waits for OK (lab screen) before deep sleep.
-const AWAKE: Duration = Duration::from_secs(60);
+/// Partial refreshes before a full one. Ghosting was hard to see after many more.
+const MAX_PARTIALS: u16 = 16;
+const BUTTON_POLL_MS: u32 = 10;
+
+/// What a menu item does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Open(View),
+    Lab,
+    FullRefresh,
+    Sleep,
+}
+
+/// A screen other than the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Info,
+    ButtonTest,
+    /// Not built yet; the label names it.
+    Soon(&'static str),
+    Asleep,
+    Off,
+}
+
+static SYSTEM: Menu<Action> = Menu::new(
+    "System",
+    &[
+        Item::action("Device info", Action::Open(View::Info)),
+        Item::action("Button test", Action::Open(View::ButtonTest)),
+        Item::action("Refresh lab", Action::Lab),
+        Item::action("Full refresh", Action::FullRefresh),
+        Item::action("Sleep now", Action::Sleep),
+    ],
+);
+
+static ROOT: Menu<Action> = Menu::new(
+    "ZECTRIX NOTE4",
+    &[
+        Item::action("Lights", Action::Open(View::Soon("Lights"))),
+        Item::action("Calendar", Action::Open(View::Soon("Calendar"))),
+        Item::action("Weather", Action::Open(View::Soon("Weather"))),
+        Item::action("Last answer", Action::Open(View::Soon("Last answer"))),
+        Item::submenu("System", &SYSTEM),
+    ],
+);
+
+/// Readings shown on the info screen.
+struct Status {
+    battery_mv: Option<u32>,
+    charging: bool,
+    full: bool,
+    woke_by_ok: bool,
+}
+
+struct Ui {
+    nav: Nav<Action>,
+    /// `None` while the menu is shown.
+    view: Option<View>,
+    theme: Theme<MonoTextStyle<'static, BinaryColor>>,
+    presenter: Presenter,
+    /// Button test: the last event and the raw levels (up, down, ok; true = pressed).
+    last_event: Option<Event>,
+    levels: [bool; 3],
+}
+
+impl Ui {
+    fn draw(&self, frame: &mut MonoFrame, status: &Status) {
+        let t = &self.theme;
+        let Some(view) = self.view else {
+            let partials = self.presenter.policy().partials();
+            let _ = view::draw_menu(frame, t, &self.nav, |a, out| match a {
+                Action::FullRefresh => write!(out, "{partials}/{MAX_PARTIALS}"),
+                Action::Open(View::Soon(_)) => out.write_str("soon"),
+                _ => Ok(()),
+            });
+            return;
+        };
+        let mut lines: [Label; 6] = Default::default();
+        let title = match view {
+            View::Info => {
+                let _ = write!(lines[0], "Firmware {}", env!("CARGO_PKG_VERSION"));
+                match status.battery_mv {
+                    Some(mv) => {
+                        let _ = write!(
+                            lines[1],
+                            "Battery {mv} mV, ~{}%",
+                            zectrix_board::battery::percent(mv)
+                        );
+                    }
+                    None => {
+                        let _ = lines[1].push_str("Battery: no reading");
+                    }
+                }
+                let _ = lines[2].push_str(if status.charging {
+                    "Charging"
+                } else if status.full {
+                    "Charged"
+                } else {
+                    "On battery or USB"
+                });
+                let up_s = Instant::now().duration_since_epoch().as_secs();
+                let _ = write!(lines[3], "Awake {} min {} s", up_s / 60, up_s % 60);
+                let _ = lines[4].push_str(if status.woke_by_ok {
+                    "Woken by OK"
+                } else {
+                    "Started by reset"
+                });
+                let _ = write!(
+                    lines[5],
+                    "Partials since full: {}",
+                    self.presenter.policy().partials()
+                );
+                "Device info"
+            }
+            View::ButtonTest => {
+                let [u, d, o] = self.levels.map(|p| if p { "down" } else { "up" });
+                let _ = write!(lines[0], "Up {u}  Down {d}  OK {o}");
+                let _ = match self.last_event {
+                    Some(e) => write!(lines[1], "Last: {e:?}"),
+                    None => lines[1].write_str("Last: -"),
+                };
+                let _ = lines[3].push_str("Hold Up 1 s to go back.");
+                let _ = lines[4].push_str("Hold OK: talk, Down 3 s: off.");
+                "Button test"
+            }
+            View::Soon(name) => {
+                let _ = lines[0].push_str(name);
+                let _ = lines[1].push_str("comes from the server;");
+                let _ = lines[2].push_str("not built yet.");
+                "Coming soon"
+            }
+            View::Asleep => {
+                let _ = lines[0].push_str("Asleep.");
+                let _ = lines[1].push_str("OK opens the menu.");
+                if let Some(mv) = status.battery_mv {
+                    let _ = write!(
+                        lines[3],
+                        "Battery ~{}%",
+                        zectrix_board::battery::percent(mv)
+                    );
+                }
+                "ZECTRIX NOTE4"
+            }
+            View::Off => {
+                let _ = lines[0].push_str("Switched off.");
+                let _ = lines[1].push_str("The power key (Down)");
+                let _ = lines[2].push_str("switches it on.");
+                "ZECTRIX NOTE4"
+            }
+        };
+        let back = matches!(view, View::Info | View::ButtonTest | View::Soon(_));
+        let _ = view::draw_title(frame, t, title, back.then_some("OK: back"));
+        let _ = view::draw_lines(frame, t, lines.iter().map(|l| l.as_str()));
+    }
+}
+
+/// What the main loop does after an event.
+enum Effect {
+    None,
+    Redraw(Update),
+    Lab,
+    FullRefresh,
+    Sleep,
+    Off,
+}
+
+impl Ui {
+    fn handle(&mut self, event: Event) -> Effect {
+        if event == Event::Off {
+            return Effect::Off;
+        }
+        if let Some(view) = self.view {
+            if view == View::ButtonTest {
+                self.last_event = Some(event);
+                if event != Event::Back {
+                    return Effect::Redraw(Update::Change);
+                }
+            }
+            return match event {
+                Event::Select | Event::Back => {
+                    self.view = None;
+                    Effect::Redraw(Update::NewScreen)
+                }
+                // Info: Up/Down re-read the values.
+                Event::Up | Event::Down if view == View::Info => Effect::Redraw(Update::Change),
+                _ => Effect::None,
+            };
+        }
+        match self.nav.handle(event) {
+            Outcome::Activate(Action::Open(view)) => {
+                self.view = Some(view);
+                Effect::Redraw(Update::NewScreen)
+            }
+            Outcome::Activate(Action::Lab) => Effect::Lab,
+            Outcome::Activate(Action::FullRefresh) => Effect::FullRefresh,
+            Outcome::Activate(Action::Sleep) => Effect::Sleep,
+            o if o.page_changed() => Effect::Redraw(Update::NewScreen),
+            o if o.redraw() => Effect::Redraw(Update::Change),
+            // Talk (OK held) comes with voice; Back on the root does nothing.
+            _ => Effect::None,
+        }
+    }
+}
+
+/// Draw the current screen and show it with as small a refresh as the policy allows.
+fn show(
+    ui: &mut Ui,
+    epd: &mut lab::Epd,
+    frame: &mut MonoFrame,
+    shadow: &mut MonoFrame,
+    status: &Status,
+    update: Update,
+) {
+    ui.draw(frame, status);
+    let t = Instant::now();
+    match ui.presenter.show(epd, frame, shadow, update) {
+        Ok(Shown::Unchanged) => {}
+        Ok(shown) => info!("{shown:?} in {} ms", t.elapsed().as_millis()),
+        Err(e) => error!("display: {e:?}"),
+    }
+}
+
+fn now_ms() -> u64 {
+    Instant::now().duration_since_epoch().as_millis()
+}
 
 #[main]
 fn main() -> ! {
     let p = esp_hal::init(esp_hal::Config::default());
     // First: keep ourselves powered on battery.
-    let _latch = PowerLatch::engage(p.GPIO17);
+    let latch = PowerLatch::engage(p.GPIO17);
 
     esp_println::logger::init_logger_from_env();
-    let by_timer = esp_hal::system::wakeup_cause().contains(WakeupSource::Timer);
+    // The only other wake source is the timer, which this firmware does not set.
+    let cause = esp_hal::system::wakeup_cause();
+    let woke_by_ok = !cause.is_empty() && !cause.contains(WakeupSource::Timer);
     info!(
-        "NOTE4 firmware {} (timer wake {by_timer})",
+        "NOTE4 firmware {} (OK wake {woke_by_ok})",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -82,30 +314,26 @@ fn main() -> ! {
     let mut ok = Input::new(p.GPIO0, pull_up);
     let down = Input::new(p.GPIO18, pull_up);
     let up = Input::new(p.GPIO39, pull_up);
-    let charging = Input::new(p.GPIO2, pull_up).is_low();
-    let full = Input::new(p.GPIO1, InputConfig::default()).is_high();
-
-    // GPIO18 is also the power key: if it switched us on, wait for its release so it is
-    // not read as a button press later (youn-ink does the same).
-    let mut waited = 0;
-    while down.is_low() && waited < 5_000 {
-        delay.delay_millis(10);
-        waited += 10;
-    }
-
-    let battery_mv = Battery::new(p.ADC1, p.GPIO4).read_mv();
-    info!("battery {battery_mv:?} mV, charging {charging}, full {full}");
-
-    let frame = FRAME.take();
-    // Raw button levels on the card (1 = released), to check the pins on new hardware.
-    let levels = [up.is_high(), down.is_high(), ok.is_high()];
-    draw(frame, battery_mv, charging, full, !by_timer, levels);
+    let charging_pin = Input::new(p.GPIO2, pull_up);
+    let full_pin = Input::new(p.GPIO1, InputConfig::default());
+    let mut battery = Battery::new(p.ADC1, p.GPIO4);
+    let read_status = |battery: &mut Battery| Status {
+        battery_mv: battery.read_mv(),
+        charging: charging_pin.is_low(),
+        full: full_pin.is_high(),
+        woke_by_ok,
+    };
+    let mut status = read_status(&mut battery);
+    info!(
+        "battery {:?} mV, charging {}, full {}",
+        status.battery_mv, status.charging, status.full
+    );
 
     let spi = Spi::new(
         p.SPI3,
         SpiConfig::default()
             .with_frequency(Rate::from_mhz(20))
-            .with_mode(Mode::_0),
+            .with_mode(SpiMode::_0),
     )
     .expect("SPI config")
     .with_sck(p.GPIO12)
@@ -126,96 +354,101 @@ fn main() -> ! {
         ..Timing::default()
     });
 
-    let result = epd.power_on().and_then(|_| epd.show_mono(frame, None));
-    if let Err(e) = &result {
-        error!("display: {e:?}");
-    }
-    if !by_timer && result.is_ok() {
-        let mut buttons = lab::Buttons::new(&up, &down, &ok);
-        // Only OK opens the lab. Up/Down are ignored here: GPIO18 doubles as the power key
-        // and may read low, which used to end the wait at once and send the device to sleep.
-        if lab::wait_for(&mut buttons, &delay, AWAKE, lab::Press::Ok) {
-            lab::run(&mut epd, frame, SHADOW.take(), &mut buttons, &delay);
+    let frame = FRAME.take();
+    let shadow = SHADOW.take();
+    let theme = Theme::note4(MonoTextStyle::new(&FONT_10X20, BinaryColor::On));
+    let mut ui = Ui {
+        nav: Nav::new(&ROOT, theme.rows_per_page()),
+        view: None,
+        theme,
+        presenter: Presenter::new(RefreshPolicy::new(MAX_PARTIALS).with_partial_screens(true)),
+        last_event: None,
+        levels: [false; 3],
+    };
+
+    let mut buttons = Buttons::default();
+    // Buttons held at start (OK that woke us, Down that switched us on) count only after
+    // they were released.
+    for (b, pin) in [(Button::Ok, &ok), (Button::Down, &down), (Button::Up, &up)] {
+        if pin.is_low() {
+            buttons.ignore_until_release(b, now_ms());
         }
+    }
+
+    if let Err(e) = epd.power_on() {
+        error!("panel power: {e:?}");
+    }
+    show(&mut ui, &mut epd, frame, shadow, &status, Update::NewScreen);
+
+    let mut session = Session::with_default(now_ms());
+    let off = loop {
+        let t = now_ms();
+        ui.levels = [up.is_low(), down.is_low(), ok.is_low()];
+        buttons.input(Button::Up, ui.levels[0], t);
+        buttons.input(Button::Down, ui.levels[1], t);
+        buttons.input(Button::Ok, ui.levels[2], t);
+        let mut leave = None;
+        while let Some(event) = buttons.poll(t) {
+            session.touch(t);
+            info!("button {event:?}");
+            match ui.handle(event) {
+                Effect::None => {}
+                Effect::Redraw(update) => {
+                    if ui.view == Some(View::Info) {
+                        status = read_status(&mut battery);
+                    }
+                    show(&mut ui, &mut epd, frame, shadow, &status, update);
+                }
+                Effect::FullRefresh => {
+                    ui.draw(frame, &status);
+                    if let Err(e) = ui.presenter.full(&mut epd, frame, shadow) {
+                        error!("display: {e:?}");
+                    }
+                }
+                Effect::Lab => {
+                    let mut lab_buttons = lab::Buttons::new(&up, &down, &ok);
+                    lab::run(&mut epd, frame, shadow, &mut lab_buttons, &delay);
+                    // The lab ends with a full refresh of its own screen.
+                    ui.presenter.policy_mut().shadow_restored();
+                    buttons.ignore_until_release(Button::Ok, now_ms());
+                    session.touch(now_ms());
+                    show(&mut ui, &mut epd, frame, shadow, &status, Update::NewScreen);
+                }
+                Effect::Sleep => leave = Some(false),
+                Effect::Off => leave = Some(true),
+            }
+        }
+        if let Some(off) = leave {
+            break off;
+        }
+        if session.should_sleep(t) {
+            break false;
+        }
+        delay.delay_millis(BUTTON_POLL_MS);
+    };
+
+    // Last screen: a clean full refresh, so the image stays sharp while asleep.
+    ui.view = Some(if off { View::Off } else { View::Asleep });
+    ui.draw(frame, &status);
+    if let Err(e) = ui.presenter.full(&mut epd, frame, shadow) {
+        error!("display: {e:?}");
     }
     let _ = epd.power_off();
     let (_spi, _cs, _dc, _rst, _busy, mut rail, _delay) = epd.release();
     power::hold_through_sleep(&mut rail);
-
     led.set_high(); // off
-    info!("sleeping; OK or {} min wakes", WAKE_INTERVAL.as_secs() / 60);
-    power::deep_sleep(p.LPWR, &mut ok, Some(WAKE_INTERVAL))
-}
 
-fn draw(
-    frame: &mut MonoFrame,
-    battery_mv: Option<u32>,
-    charging: bool,
-    full: bool,
-    awake: bool,
-    levels: [bool; 3],
-) {
-    let _ = frame.clear(BinaryColor::Off);
-    let ink = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(400, 80))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-        .draw(frame);
-    let paper = MonoTextStyle::new(&FONT_10X20, BinaryColor::Off);
-    let _ = Text::new("ZECTRIX NOTE4", Point::new(20, 36), paper).draw(frame);
-    let _ = Text::new(
-        concat!("Rust firmware v", env!("CARGO_PKG_VERSION")),
-        Point::new(20, 64),
-        paper,
-    )
-    .draw(frame);
-
-    // Checkerboard and line gauges to judge ghosting and sharpness.
-    for i in 0..8 {
-        for j in 0..4 {
-            if (i + j) % 2 == 0 {
-                let _ = Rectangle::new(Point::new(20 + i * 20, 100 + j * 20), Size::new(20, 20))
-                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-                    .draw(frame);
-            }
+    if off {
+        info!("switching off");
+        // Wait for Down to be released, or it would switch the device on again.
+        while down.is_low() {
+            delay.delay_millis(BUTTON_POLL_MS);
         }
+        latch.release();
+        // Still running: USB power keeps the board on. Sleep instead.
+        delay.delay_millis(500);
+        warn!("still powered (USB?), sleeping instead");
     }
-    for k in 0..10 {
-        let _ = Rectangle::new(
-            Point::new(200 + k * 18, 100),
-            Size::new(1 + k as u32 / 3, 80),
-        )
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-        .draw(frame);
-    }
-
-    let mut line: heapless::String<48> = heapless::String::new();
-    match battery_mv {
-        Some(mv) => {
-            let _ = write!(
-                line,
-                "Battery {mv} mV ~{}%",
-                zectrix_board::battery::percent(mv)
-            );
-        }
-        None => {
-            let _ = write!(line, "Battery: no reading");
-        }
-    }
-    if charging {
-        let _ = line.push_str(" chg");
-    } else if full {
-        let _ = line.push_str(" full");
-    }
-    let _ = Text::new(&line, Point::new(20, 250), ink).draw(frame);
-    let hint = if awake {
-        "OK within 60 s = lab"
-    } else {
-        "OK = wake"
-    };
-    let _ = Text::new(hint, Point::new(20, 280), ink).draw(frame);
-    let mut pins: heapless::String<16> = heapless::String::new();
-    let [u, d, o] = levels.map(u8::from);
-    let _ = write!(pins, "U{u} D{d} OK{o}");
-    let _ = Text::new(&pins, Point::new(260, 280), ink).draw(frame);
+    info!("sleeping; OK wakes");
+    power::deep_sleep(p.LPWR, &mut ok, None)
 }

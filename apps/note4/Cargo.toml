@@ -25,4 +25,5 @@ embedded-graphics.workspace = true
 static_cell.workspace = true
 heapless.workspace = true
 ssd2683.workspace = true
+zectrix-screen.workspace = true
 zectrix-board = { workspace = true, features = ["hal"] }
