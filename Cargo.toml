@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "apps/note4", "apps/note4c"]
+members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "crates/zectrix-screen", "apps/note4", "apps/note4c"]
 # `cargo test` at the root runs the host-testable crates only. The firmware apps build
 # for Xtensa from their own directories (see justfile), which carry the target config.
-default-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net"]
+default-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "crates/zectrix-screen"]
 
 [workspace.package]
 edition = "2024"
@@ -27,6 +27,7 @@ heapless = "0.9"
 ssd2683 = { path = "crates/ssd2683" }
 zectrix-board = { path = "crates/zectrix-board" }
 zectrix-net = { path = "crates/zectrix-net" }
+zectrix-screen = { path = "crates/zectrix-screen" }
 # Networking (M1), versions per docs/RUST_RESEARCH.md and the esp-mbedtls ESP example.
 esp-rtos = { version = "0.4.0", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc", "log-04"] }
 esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable", "log-04"] }
