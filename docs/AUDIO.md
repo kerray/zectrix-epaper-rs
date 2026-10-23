@@ -38,7 +38,7 @@ provenance in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 | Format | standard (Philips) I2S, 16-bit words, both ports unmuted | `09`, `0A` = `0C` |
 | Clocks | MCLK 4.096 MHz / 16 kHz row of the coefficient table | `02`–`08` |
 | Mic input | analog MIC1P/N, analog PGA 30 dB | `14` = `1A` |
-| Mic gain | digital ADC scale +30 dB (demo: `set_in_gain(30)`) | `16` = `05` |
+| Mic gain | digital ADC scale +30 dB (demo: `set_in_gain(30)`); the loopback app uses +36 dB | `16` = `05` / `06` |
 | ADC volume | 0 dB | `17` = `BF` |
 | DAC reference | DAC output looped into the right ADC slot (for echo cancelling later) | `44` = `58` |
 | Volume | 0–100 % on the reference curve (`98 + v`); demo default 80 % = `B2` ≈ −6.5 dB. The app starts at 70 %. | `32` |
@@ -59,6 +59,10 @@ The clock table covers 8–48 kHz with the usual MCLK values; for 256 × fs, 8, 
 - Both directions use `DmaRxStreamBuf` / `DmaTxStreamBuf` rings of 8 KiB (128 ms) in internal
   RAM. The recording (up to 30 s of stereo frames, 1.9 MB) lives in the 8 MB octal PSRAM
   (`Psram::new` with `PsramMode::OctalSpi`, `esp_alloc::psram_allocator!`).
+- **RX frames can straddle DMA descriptors.** esp-hal starts RX with an EOF count that is
+  not a whole number of frames, so some pops end mid-frame. Dropping the remainder shifts the
+  stream by one sample and swaps the slots (seen on hardware: every 1024 frames). `Streams`
+  keeps the partial frame for the next pop.
 - Frames are 4 bytes: slot 0 then slot 1, little endian. The ES8311 is mono: the app sends
   the same sample in both slots, and on receive it plays back whichever slot was louder
   during the recording (the mic slot; with the DAC reference on, the other slot is the
@@ -98,6 +102,40 @@ helpers assume `SAMPLE_RATE` = 16 kHz.
 
 If OK woke the device, the app waits for it to be released before a press starts a recording.
 
+## Hardware results (NOTE4, 2026-10-23)
+
+- Codec, beeps, recording and playback work. The beeps were clean from the first build.
+- The first builds played back with long gaps: the slot swap described above. After the fix
+  the mic stays in **slot 0**, and slot 1 (the DAC reference) is exactly zero while
+  recording; no dropouts or clicks in a 5 s recording.
+- Level at +30 dB digital gain, counting at normal voice: peaks −13.6 dBFS, RMS −30 dBFS.
+  The app now uses +36 dB.
+- Tone: the mic path is dark. Relative to the strongest band (150 Hz) the recording is
+  −16 dB at 1 kHz, −27 dB at 3 kHz, −41 dB at 4 kHz and −48 dB at 6 kHz, about 15 dB less
+  above 3 kHz than typical speech. Probably the acoustics behind the mic hole. Fine for
+  speech recognition; a high-shelf boost (ES8311 ADC EQ or in software) is an option if
+  playback quality matters.
+- Loop timing: the longest main-loop pass was 0.4–5 ms, the rings never got near full or
+  empty, no stream stalls.
+
+### Getting a recording to a PC
+
+Logs over USB/IP lose most of a large dump (esp-println gives up after a sub-millisecond
+FIFO wait), so after each playback the app writes the recording to the start of the spare
+`ota_1` partition and plays a tick (a long buzz if that failed). It only writes there if the
+first sector is blank or holds an earlier recording, so an app image is never overwritten.
+`otadata` is blank after `just flash`, so `ota_1` is never booted.
+
+```sh
+espflash read-flash -p /dev/ttyACM0 -c esp32s3 --after no-reset 0x610000 0x200000 rec.bin
+python3 tools/pcm-from-log.py rec.bin rec.wav
+```
+
+`0x610000` is `ota_1` on the NOTE4 table (for another device, look it up with
+`just partitions <backup>`); 2 MiB
+covers 30 s. The tool writes a stereo WAV (left = slot 0) and reports level, dropouts, clicks
+and band levels for each slot.
+
 ## On-device test (owner)
 
 Use USB power, and do not keep a serial monitor attached through a whole test over WSL
@@ -123,9 +161,8 @@ amplifier switches, and the slot peaks.
 
 ## Known issues and risks
 
-- **Not tested on hardware.** The register sequences match the reference driver step by step
-  (host tests), but the I2S side (slot order, signal loopback, MCLK routing on GPIO14) is
-  only checked against esp-hal's source and its HIL test.
+- **Tested on the NOTE4 only** (see "Hardware results"). The NOTE4C has the same audio
+  parts but has not run the app yet.
 - **GPIO46 is a strapping pin.** The app drives it only after boot, starts it low and holds it
   low in deep sleep. Something external pulling it high at reset would change the boot mode.
 - **I2C needs the audio rail.** The pull-ups for the whole I2C bus (codec, RTC, NFC) sit on

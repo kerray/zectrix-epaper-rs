@@ -30,9 +30,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use es8311::{Config as CodecConfig, Es8311};
-use esp_bootloader_esp_idf::partitions;
 use esp_backtrace as _;
-use esp_storage::FlashStorage;
+use esp_bootloader_esp_idf::partitions;
 use esp_hal::{
     Blocking,
     clock::CpuClock,
@@ -48,6 +47,7 @@ use esp_hal::{
     psram::{Psram, PsramConfig, PsramMode},
     time::{Duration, Instant, Rate},
 };
+use esp_storage::FlashStorage;
 use heapless::Deque;
 use log::{error, info, warn};
 use zectrix_board::audio::{
@@ -355,6 +355,9 @@ fn main() -> ! {
     let mut volume = VOLUME_DEFAULT;
     let codec_config = CodecConfig {
         volume,
+        // The demo's +30 dB gave speech peaks around -14 dBFS on the NOTE4; +6 dB more
+        // still leaves headroom.
+        mic_gain: es8311::MicGain::Db36,
         ..CodecConfig::default()
     };
     if let Err(e) = codec.init(&codec_config) {
