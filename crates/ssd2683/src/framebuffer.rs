@@ -13,7 +13,7 @@ use embedded_graphics_core::{
     pixelcolor::BinaryColor,
 };
 
-use crate::{HEIGHT, NATIVE_FRAME_BYTES, NATIVE_STRIDE, QuadColor, WIDTH};
+use crate::{HEIGHT, NATIVE_FRAME_BYTES, NATIVE_STRIDE, QuadColor, Rect, WIDTH};
 
 /// Bytes per row of a 1 bpp frame.
 pub const MONO_STRIDE: usize = WIDTH as usize / 8;
@@ -83,6 +83,73 @@ impl MonoFrame {
         for (i, &b) in row.iter().enumerate() {
             out[i * 2] = expand_nibble(b >> 4);
             out[i * 2 + 1] = expand_nibble(b & 0x0F);
+        }
+    }
+
+    /// Copy all pixels from `src`.
+    pub fn copy_from(&mut self, src: &MonoFrame) {
+        self.buf.copy_from_slice(&src.buf);
+    }
+
+    /// Copy the pixels inside `rect` from `src`. The parts of `rect` outside the panel
+    /// are ignored.
+    pub fn copy_rect(&mut self, src: &MonoFrame, rect: Rect) {
+        let x1 = rect.right().min(WIDTH);
+        let y1 = rect.bottom().min(HEIGHT);
+        if rect.x.is_multiple_of(8) && x1.is_multiple_of(8) {
+            // Whole bytes, e.g. a refreshed window.
+            let bytes = rect.x as usize / 8..x1 as usize / 8;
+            for y in rect.y as usize..y1 as usize {
+                let row = y * MONO_STRIDE;
+                self.buf[row + bytes.start..row + bytes.end]
+                    .copy_from_slice(&src.buf[row + bytes.start..row + bytes.end]);
+            }
+            return;
+        }
+        for y in rect.y as u32..y1 {
+            for x in rect.x as u32..x1 {
+                if let Some(c) = src.get(x, y) {
+                    self.set(x, y, c);
+                }
+            }
+        }
+    }
+
+    /// The smallest rectangle that holds every pixel that differs between `self` and
+    /// `other`, or `None` if the frames are equal. Pass it to
+    /// [`Ssd2683::show_mono_partial`](crate::Ssd2683::show_mono_partial), which widens
+    /// it to whole bytes.
+    pub fn dirty_rect(&self, other: &MonoFrame) -> Option<Rect> {
+        let mut out: Option<Rect> = None;
+        for y in 0..HEIGHT as usize {
+            let a = &self.buf[y * MONO_STRIDE..(y + 1) * MONO_STRIDE];
+            let b = &other.buf[y * MONO_STRIDE..(y + 1) * MONO_STRIDE];
+            let Some(first) = (0..MONO_STRIDE).find(|&i| a[i] != b[i]) else {
+                continue;
+            };
+            let last = (first..MONO_STRIDE).rev().find(|&i| a[i] != b[i])?;
+            let x0 = first * 8 + (a[first] ^ b[first]).leading_zeros() as usize;
+            let x1 = last * 8 + 8 - (a[last] ^ b[last]).trailing_zeros() as usize;
+            let row = Rect::new(x0 as u16, y as u16, (x1 - x0) as u16, 1);
+            out = Some(out.map_or(row, |r| r.union(&row)));
+        }
+        out
+    }
+
+    /// Transition codes `(old << 1) | new` for row `y`, 1 bpp bytes `bytes` (8 px each),
+    /// two output bytes per input byte. `self` is the old image.
+    pub(crate) fn transition_row(
+        &self,
+        new: &MonoFrame,
+        y: usize,
+        bytes: core::ops::Range<usize>,
+        out: &mut [u8],
+    ) {
+        let base = y * MONO_STRIDE;
+        for (k, i) in bytes.enumerate() {
+            let (o, n) = (self.buf[base + i], new.buf[base + i]);
+            out[k * 2] = (expand_nibble(o >> 4) << 1) | expand_nibble(n >> 4);
+            out[k * 2 + 1] = (expand_nibble(o & 0x0F) << 1) | expand_nibble(n & 0x0F);
         }
     }
 }

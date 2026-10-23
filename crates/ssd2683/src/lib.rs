@@ -9,7 +9,10 @@
 //!   waveform is selected with `E9 01` and nothing else is configured. Full refresh only.
 //! * **NOTE4** (mono): `00` black, `01` white. The panel setting register is written
 //!   (`00 2F 0E`), and before every full refresh the OTP waveform is picked for the panel
-//!   temperature (`E0 02`, `E6 <code>`, `A5`).
+//!   temperature (`E0 02`, `E6 <code>`, `A5`). The mono panel also supports a
+//!   **partial refresh** of a window ([`Ssd2683::show_mono_partial`]): each pixel is sent
+//!   as a transition code `(old << 1) | new`, so the caller keeps a copy of the image on
+//!   the panel (the "shadow", a [`MonoFrame`]).
 //!
 //! Sequences are ported from MIT-licensed C drivers, see `THIRD_PARTY_NOTICES.md`:
 //! Zectrix Lab `zectrix-note4-epd-demo` (mono) and LazyYoun `youn-ink-fourcolor-firmware`
@@ -23,10 +26,12 @@ pub mod color;
 pub mod command;
 mod driver;
 pub mod framebuffer;
+pub mod rect;
 
 pub use color::QuadColor;
 pub use driver::{Error, Panel, Ssd2683, Stage, Timing};
 pub use framebuffer::{MonoFrame, QuadFrame};
+pub use rect::Rect;
 
 /// Panel width in pixels (both devices).
 pub const WIDTH: u32 = 400;

@@ -4,7 +4,7 @@ use embedded_hal::{
     spi::SpiBus,
 };
 
-use crate::{HEIGHT, MonoFrame, NATIVE_STRIDE, QuadFrame, command as cmd};
+use crate::{HEIGHT, MonoFrame, NATIVE_STRIDE, QuadFrame, Rect, command as cmd};
 
 /// Which panel is attached. The pin map is the same on both devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,8 @@ pub enum Error<SpiE> {
     WrongPanel,
     /// A frame was sent while the panel rail was off; call [`Ssd2683::power_on`].
     NotPowered,
+    /// A partial-refresh rectangle was empty or reached past the panel edge.
+    InvalidRect,
 }
 
 /// Wait parameters. The defaults follow emini-home: 120 s per BUSY stage (a four-colour
@@ -217,6 +219,86 @@ where
         }
         self.end_data()?;
         self.refresh()
+    }
+
+    /// Partial refresh of a window on the black/white panel (NOTE4), with the OTP
+    /// waveforms.
+    ///
+    /// * `shadow` must hold exactly the image that is on the panel now (after a full
+    ///   refresh: a copy of the frame that was shown). The controller drives each pixel
+    ///   from its old to its new value, so a wrong shadow leaves wrong pixels.
+    /// * `new` is the whole new frame; only the window is sent.
+    /// * `rect` is widened to whole bytes: x is rounded down to a multiple of 8 and the
+    ///   right edge up (at most 400). The extra pixels are also taken from `new`.
+    ///
+    /// On success the window is copied from `new` into `shadow` and the window that was
+    /// refreshed is returned. On an error `shadow` is left as it was, but part of the
+    /// window may have changed on the panel: treat the shadow as invalid and do a full
+    /// refresh ([`Ssd2683::show_mono`]) next.
+    ///
+    /// Sequence (official Zectrix driver, `zectrix_epd_refresh_partial_1bpp`): reset and
+    /// OTP selection, `50 77`, `E0 00`, `A5`, the window `83`, `10` with one transition
+    /// code `(old << 1) | new` per pixel (`00` B→B, `01` B→W, `10` W→B, `11` W→W), then
+    /// the same `04`, `12 00`, `02 00` as a full refresh.
+    pub fn show_mono_partial(
+        &mut self,
+        shadow: &mut MonoFrame,
+        new: &MonoFrame,
+        rect: Rect,
+    ) -> Result<Rect, Error<SPI::Error>> {
+        if self.panel != Panel::Mono {
+            return Err(Error::WrongPanel);
+        }
+        if !rect.is_valid() {
+            return Err(Error::InvalidRect);
+        }
+        self.ensure_powered()?;
+        let win = rect.aligned();
+        let (x0, x1) = (win.x, win.x + win.w - 1);
+        let (y0, y1) = (win.y, win.y + win.h - 1);
+
+        self.reset_and_select_otp()?;
+        self.command_with_data(cmd::VCOM_DATA_INTERVAL, &[0x77])?;
+        self.command_with_data(cmd::CASCADE_SETTING, &[0x00])?;
+        self.command(cmd::TEMP_ACTIVATE)?;
+        self.wait_busy(Stage::TempActivate)?;
+        self.delay.delay_ms(10);
+        let [x0h, x0l] = x0.to_be_bytes();
+        let [x1h, x1l] = x1.to_be_bytes();
+        let [y0h, y0l] = y0.to_be_bytes();
+        let [y1h, y1l] = y1.to_be_bytes();
+        self.command_with_data(
+            cmd::PARTIAL_WINDOW,
+            &[
+                x0h & 0x03,
+                x0l,
+                x1h & 0x03,
+                x1l,
+                y0h & 0x03,
+                y0l,
+                y1h & 0x03,
+                y1l,
+                0x01,
+            ],
+        )?;
+
+        self.command(cmd::DATA_START)?;
+        self.wait_busy(Stage::DataStart)?;
+        let bytes = win.x as usize / 8..(win.x + win.w) as usize / 8;
+        let len = bytes.len() * 2;
+        let mut row = [0u8; NATIVE_STRIDE];
+        self.begin_data()?;
+        for y in y0 as usize..=y1 as usize {
+            shadow.transition_row(new, y, bytes.clone(), &mut row);
+            if let Err(e) = self.spi.write(&row[..len]) {
+                let _ = self.end_data();
+                return Err(Error::Spi(e));
+            }
+        }
+        self.end_data()?;
+        self.refresh()?;
+        shadow.copy_rect(new, win);
+        Ok(win)
     }
 
     /// Deep-sleep the controller and switch the panel rail off. The image stays.

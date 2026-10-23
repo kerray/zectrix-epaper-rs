@@ -19,8 +19,8 @@ Each MIT notice is reproduced in full, as the licence requires.
 ## zectrix-note4-epd-demo (Zectrix Lab)
 
 <https://github.com/itopinion/zectrix-note4-epd-demo>. Source of the NOTE4 mono panel
-sequence: panel setting, OTP selection, temperature codes and the reset-before-refresh
-rule.
+sequence: panel setting, OTP selection, temperature codes, the reset-before-refresh
+rule, and the partial refresh (window command, 8-px alignment, transition codes).
 
 ```
 MIT License

@@ -57,10 +57,10 @@ The controller RAM is always 2 bpp: 4 px per byte, MSB = leftmost pixel, 100 B p
 | Before data | – | temperature code → `E0 02`, `E6 <232..244>`, `A5`. The sensor read (`0x40`) is not implemented yet, so the driver uses the official 25 °C fallback (code 241). |
 | Refresh | `10` + data, `04`, `12 00`, `02 00` | same |
 | Sleep | `07 A5`, rail off | rail off (our driver also sends `07 A5`; the official mono driver only cuts the rail) |
-| Partial | none known | `83` window + transition codes (roadmap) |
+| Partial | none known | `50 77`, `E0 00`, `A5`, `83` window (x in whole bytes), `10` + transition codes `(old << 1) \| new`, then refresh. `show_mono_partial`, see [INTERACTIVE.md](INTERACTIVE.md) |
 | Grey | – | 16 levels via external LUT (roadmap) |
 
-`crates/ssd2683` implements both full-refresh paths. Host tests check the command
+`crates/ssd2683` implements both full-refresh paths and the mono partial refresh. Host tests check the command
 sequences against the reference C drivers.
 
 ## Flash layout (NOTE4C factory, verified by hash)

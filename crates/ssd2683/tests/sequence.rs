@@ -1,129 +1,13 @@
 //! Host tests: record what the driver puts on the wire and compare it with the
 //! sequences of the reference C drivers (see docs/vendor/RESEARCH_NOTES.md §3).
 
-use std::{cell::RefCell, convert::Infallible, rc::Rc};
+mod common;
 
+use std::rc::Rc;
+
+use common::*;
 use embedded_graphics_core::{pixelcolor::BinaryColor, prelude::*};
-use embedded_hal::{delay::DelayNs, digital, spi};
 use ssd2683::{Error, MonoFrame, Panel, QuadColor, QuadFrame, Ssd2683, Timing};
-
-#[derive(Debug, Clone, PartialEq)]
-enum Ev {
-    Pin(&'static str, bool),
-    Byte(u8),
-}
-
-type Log = Rc<RefCell<Vec<Ev>>>;
-
-struct Spi(Log);
-impl spi::ErrorType for Spi {
-    type Error = Infallible;
-}
-impl spi::SpiBus for Spi {
-    fn read(&mut self, _: &mut [u8]) -> Result<(), Infallible> {
-        unimplemented!()
-    }
-    fn write(&mut self, w: &[u8]) -> Result<(), Infallible> {
-        self.0.borrow_mut().extend(w.iter().map(|&b| Ev::Byte(b)));
-        Ok(())
-    }
-    fn transfer(&mut self, _: &mut [u8], _: &[u8]) -> Result<(), Infallible> {
-        unimplemented!()
-    }
-    fn transfer_in_place(&mut self, _: &mut [u8]) -> Result<(), Infallible> {
-        unimplemented!()
-    }
-    fn flush(&mut self) -> Result<(), Infallible> {
-        Ok(())
-    }
-}
-
-struct Out(&'static str, Log);
-impl digital::ErrorType for Out {
-    type Error = Infallible;
-}
-impl digital::OutputPin for Out {
-    fn set_low(&mut self) -> Result<(), Infallible> {
-        self.1.borrow_mut().push(Ev::Pin(self.0, false));
-        Ok(())
-    }
-    fn set_high(&mut self) -> Result<(), Infallible> {
-        self.1.borrow_mut().push(Ev::Pin(self.0, true));
-        Ok(())
-    }
-}
-
-/// BUSY that alternates low (busy) / high (idle) on every read, which satisfies both
-/// "wait while busy" and "wait until the refresh starts".
-struct Busy {
-    reads: u32,
-    stuck_low: bool,
-}
-impl digital::ErrorType for Busy {
-    type Error = Infallible;
-}
-impl digital::InputPin for Busy {
-    fn is_high(&mut self) -> Result<bool, Infallible> {
-        self.reads += 1;
-        Ok(!self.stuck_low && self.reads.is_multiple_of(2))
-    }
-    fn is_low(&mut self) -> Result<bool, Infallible> {
-        self.is_high().map(|h| !h)
-    }
-}
-
-struct NoDelay;
-impl DelayNs for NoDelay {
-    fn delay_ns(&mut self, _: u32) {}
-}
-
-type Drv = Ssd2683<Spi, Out, Out, Out, Busy, Out, NoDelay>;
-
-fn driver(panel: Panel) -> (Drv, Log) {
-    let log: Log = Rc::default();
-    let d = Ssd2683::new(
-        Spi(log.clone()),
-        Out("cs", log.clone()),
-        Out("dc", log.clone()),
-        Out("rst", log.clone()),
-        Busy {
-            reads: 0,
-            stuck_low: false,
-        },
-        Out("pwr", log.clone()),
-        NoDelay,
-        panel,
-    );
-    (d, log)
-}
-
-/// Decode the log into (command, data) pairs using the DC line.
-fn transactions(log: &Log) -> Vec<(u8, Vec<u8>)> {
-    let mut dc = false;
-    let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
-    for ev in log.borrow().iter() {
-        match ev {
-            Ev::Pin("dc", level) => dc = *level,
-            Ev::Byte(b) if !dc => out.push((*b, Vec::new())),
-            Ev::Byte(b) => out.last_mut().expect("data before command").1.push(*b),
-            _ => {}
-        }
-    }
-    out
-}
-
-fn summary(t: &[(u8, Vec<u8>)]) -> Vec<(u8, Vec<u8>)> {
-    // Replace long pixel payloads by their length so the sequence stays readable.
-    t.iter()
-        .map(|(c, d)| {
-            if d.len() > 16 {
-                (*c, vec![0xDD])
-            } else {
-                (*c, d.clone())
-            }
-        })
-        .collect()
-}
 
 #[test]
 fn quad_full_refresh_matches_reference_sequence() {
@@ -232,6 +116,7 @@ fn busy_timeout_is_reported() {
         Busy {
             reads: 0,
             stuck_low: true,
+            stuck_after: None,
         },
         Out("pwr", log.clone()),
         NoDelay,
