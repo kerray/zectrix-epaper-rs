@@ -43,7 +43,8 @@ controller, a PCF8563 RTC, an ES8311 audio codec with mic and speaker, NFC, and 
 | Audio rail / speaker amp | 42 / 46 | active high; 46 is a strapping pin |
 | Expansion J3 | 40, 41, TX 43, RX 44 | |
 
-The same values are in `crates/zectrix-board/src/pins.rs`.
+The same values are in `crates/zectrix-board/src/pins.rs`. Audio (ES8311 settings, power order, the
+loopback test) is in [AUDIO.md](AUDIO.md).
 
 ## Display controller: SSD2683
 

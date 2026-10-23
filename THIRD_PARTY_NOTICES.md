@@ -3,24 +3,29 @@
 This project is licensed under `MIT OR Apache-2.0` (see `LICENSE-MIT` and `LICENSE-APACHE`).
 It contains the following third-party material:
 
-- **Ported logic.** `crates/ssd2683` and `crates/zectrix-board` are Rust ports of command
-  sequences, pin maps and formulas from the MIT-licensed C/C++ projects below; no source
-  file from them is copied verbatim.
-- **Copied code.** The linker helper functions in `apps/note4/build.rs` and
-  `apps/note4c/build.rs` (all of `apps/note4/build.rs`) and the `#![deny(clippy::mem_forget)]`
+- **Ported logic.** `crates/ssd2683`, `crates/es8311` and `crates/zectrix-board` are Rust
+  ports of command sequences, register tables, pin maps and formulas from the MIT- and
+  Apache-2.0-licensed C/C++ projects below; no source file from them is copied verbatim.
+- **Copied code.** The linker helper functions in `apps/note4/build.rs`,
+  `apps/audio/build.rs` and `apps/note4c/build.rs` (all of the first two) and the `#![deny(clippy::mem_forget)]`
   block in `apps/*/src/main.rs` are taken from the esp-generate project template, with a
   provenance comment in each file.
 - **Data.** `partitions/factory-16m.csv` is the NOTE4C factory partition table as published
   in youn-ink-fourcolor-firmware (from xiaozhi-esp32). The ISRG Root X1 certificate is
   listed below.
 
-Each MIT notice is reproduced in full, as the licence requires.
+Each MIT notice is reproduced in full, as the licence requires; the Apache-2.0 text is in
+`LICENSE-APACHE`.
 
 ## zectrix-note4-epd-demo (Zectrix Lab)
 
-<https://github.com/itopinion/zectrix-note4-epd-demo>. Source of the NOTE4 mono panel
-sequence: panel setting, OTP selection, temperature codes and the reset-before-refresh
-rule.
+<https://github.com/itopinion/zectrix-note4-epd-demo> (commit `ca285c9`). Source of the NOTE4
+mono panel sequence: panel setting, OTP selection, temperature codes and the
+reset-before-refresh rule. Its board adapter (`components/zectrix_board`,
+`es8311_audio_codec.cc`) is the source of the audio settings in `crates/es8311` and
+`apps/audio`: 16 kHz, MCLK = 256 × fs, 16-bit stereo Philips I2S in full duplex, codec in
+slave mode, 30 dB mic gain, volume 80 %, the 3.3 V codec / 5 V amplifier gain correction,
+and the audio-rail (GPIO42) and amplifier (GPIO46) handling.
 
 ```
 MIT License
@@ -43,6 +48,30 @@ FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TOR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+## esp_codec_dev (Espressif)
+
+<https://github.com/espressif/esp-adf/tree/master/components/esp_codec_dev>, component
+version 1.6.2 at esp-adf commit `1c7aa25` (2026-10-22), the codec driver the Zectrix demo
+uses. `crates/es8311` ports, as Rust, from `device/es8311/es8311.c`: the register sequences
+of `es8311_open`, `es8311_set_bits_per_sample`, `es8311_config_fmt`, `es8311_config_sample`,
+`es8311_start`, `es8311_suspend`, mute, mic gain and volume; the clock coefficient table
+(`coeff_div`, rows up to 48 kHz); register names from `es8311_reg.h`; and the default
+volume curve and hardware-gain formula from `esp_codec_dev.c` / `esp_codec_dev_vol.c`,
+reduced to integer arithmetic.
+
+Changes from the original: blocking `embedded-hal` I2C instead of the ESP-IDF control
+interface; slave mode, external MCLK and an analog mic only; read-modify-write cycles
+replaced by plain writes where `es8311_open` has just written the register; the word-length
+bits are cleared before being set; the chip ID is checked before the first write.
+
+```
+SPDX-FileCopyrightText: 2023 Espressif Systems (Shanghai) CO LTD
+SPDX-License-Identifier: Apache-2.0
+```
+
+Licensed under the Apache License, Version 2.0; the full text is in `LICENSE-APACHE`. The
+component ships no NOTICE file.
 
 ## youn-ink-fourcolor-firmware (LazyYoun / macheng2017)
 
@@ -166,8 +195,9 @@ DEALINGS IN THE SOFTWARE.
 <https://github.com/esp-rs/esp-hal> (`examples/wifi/embassy_dhcp`, tag `esp-hal-v1.2.2`) and
 <https://github.com/esp-rs/esp-mbedtls> (`examples/esp`, commit `e0b0611`), both dual-licensed
 MIT / Apache-2.0. `crates/zectrix-net` (`wifi.rs`, `https.rs`) follows their structure for the
-Wi-Fi station, embassy-net and mbedtls-rs session setup. The code was written for this
-project after reading the examples, not copied file by file; as it follows them closely,
+Wi-Fi station, embassy-net and mbedtls-rs session setup. `apps/audio` follows the esp-hal
+I2S test (`hil-test/src/bin/i2s.rs`, same tag) for full-duplex streaming with signal
+loopback. The code was written for this project after reading the examples, not copied file by file; as it follows them closely,
 the notice is kept here.
 
 esp-hal, `LICENSE-MIT` at tag `esp-hal-v1.2.2`:

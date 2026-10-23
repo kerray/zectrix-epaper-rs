@@ -83,7 +83,8 @@ has the same `otadata` and `ota_0` offsets but larger slots:
 | assets | 0xc00000 | 4 M |
 
 `just flash <app>` accepts only the table known for that app, so it also refuses to put the
-NOTE4 app on a NOTE4C or the other way round. If the table is neither of these (the public
+NOTE4 app on a NOTE4C or the other way round. `just flash audio` accepts either table: the
+audio loopback app never drives the panel (see [AUDIO.md](AUDIO.md)). If the table is neither of these (the public
 NOTE4 demo, for example, uses a single `factory` app at `0x10000`), **stop**. Adapt
 `partitions/` and the flash recipe to that layout first.
 
@@ -97,13 +98,13 @@ just monitor note4c        # or: just monitor note4
 If you answer anything but the app name at the prompt, nothing is written, but the chip
 stays in the bootloader (the table check left it there) until you press RESET.
 
-What `just flash` does (it refuses when there is no backup or when the device's 0x8000
-page is not the table known for that app):
+What `just flash` does (it refuses when the device's 0x8000 page is not a table known for
+that app, or when there is no `backups/<device>-*-a.bin` for the device it found):
 
 ```sh
 cargo build --release          # in apps/note4c
 espflash save-image --chip esp32s3 --flash-size 16mb \
-  --partition-table partitions/factory-16m.csv --target-app-partition ota_0 \   # note4: note4-devkit-16m.csv
+  --partition-table partitions/factory-16m.csv --target-app-partition ota_0 \   # note4: note4-devkit-16m.csv; audio: factory (fits both)
   <elf> target/note4c-app.bin
 espflash read-flash 0x8000 0x1000 …     # compare with the app's table hash
 espflash write-bin --after no-reset 0x20000 target/note4c-app.bin

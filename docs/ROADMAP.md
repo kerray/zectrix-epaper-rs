@@ -119,7 +119,8 @@ engine such as Windmill or Node-RED, a Home Assistant add-on.
 ### Voice track V1–V4 (both devices)
 
 - [ ] **V1, audio loopback:** ES8311 setup over I2C, full-duplex I2S; record while OK is held
-  and play it back; beeps. No network needed.
+  and play it back; beeps. No network needed. Built (`crates/es8311`, `apps/audio`,
+  [AUDIO.md](AUDIO.md)); not yet tried on hardware.
 - [ ] **V2, relay transport:** a WSS client on the device and a relay that echoes the audio
   back. Tests the transport, device keys and latency.
 - [ ] **V3, fast mode:** the relay connects to a realtime speech model and runs its tool calls.

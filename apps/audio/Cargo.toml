@@ -1,0 +1,26 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "audio"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+esp-hal.workspace = true
+esp-bootloader-esp-idf.workspace = true
+esp-alloc.workspace = true
+esp-backtrace = { workspace = true, features = ["panic-handler", "custom-halt"] }
+esp-println.workspace = true
+critical-section.workspace = true
+log.workspace = true
+heapless.workspace = true
+es8311.workspace = true
+zectrix-board = { workspace = true, features = ["hal"] }

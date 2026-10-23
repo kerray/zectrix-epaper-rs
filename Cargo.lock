@@ -101,6 +101,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "es8311",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "heapless 0.9.3",
+ "log",
+ "zectrix-board",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1125,13 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "es8311"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]
