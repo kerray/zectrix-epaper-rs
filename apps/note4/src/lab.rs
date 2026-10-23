@@ -6,9 +6,12 @@
 //! * On entry and on **OK held 1 s** it runs the benchmark: full refresh, one 400×40
 //!   row, two far-apart rows as two calls, the same two rows as one window, the whole
 //!   screen as a partial. Each result appears in its row.
-//! * **Up / Down** move the inverted highlight: two partial refreshes (old row, new
-//!   row), then one of the status band. Row 6 shows the time of the two row refreshes.
-//! * **OK** forces a full refresh.
+//! * **Up / Down** move the highlight with one partial refresh of a window that holds
+//!   the old row, the new row and the status band. A partial refresh costs about the
+//!   same at any size (~0.77 s measured), so one big window beats several small ones.
+//!   Row 6 shows its time.
+//! * **OK** switches the highlight between an inverted row and a thick border, and does
+//!   a full refresh.
 //! * The status band shows the last refresh and the number of partial refreshes since
 //!   the last full one. There is no automatic full refresh, so ghosting can be judged
 //!   after 8, 16, 32 … partials.
@@ -48,7 +51,7 @@ const LABELS: [&str; ROWS] = [
     "2 rows, 2 calls",
     "2 rows, 1 window",
     "Full-scr partial",
-    "Cursor move (2x)",
+    "Cursor move",
 ];
 
 const fn row_rect(i: usize) -> Rect {
@@ -161,8 +164,8 @@ struct Lab {
     last: Last,
     /// Partial refreshes since the last full refresh.
     partials: u32,
-    /// The status-band refresh time.
-    status_ms: Option<u32>,
+    /// Highlight with a thick border instead of inverting the row.
+    border: bool,
     /// `shadow` matches the panel. False after any failed refresh.
     shadow_ok: bool,
 }
@@ -180,7 +183,7 @@ pub fn run(
         values: [None; ROWS],
         last: Last::None,
         partials: 0,
-        status_ms: None,
+        border: false,
         shadow_ok: false,
     };
     lab.bench(epd, frame, shadow);
@@ -189,11 +192,14 @@ pub fn run(
             Some(Press::Up) => lab.move_cursor(epd, frame, shadow, ROWS - 1),
             Some(Press::Down) => lab.move_cursor(epd, frame, shadow, 1),
             Some(Press::Ok) => {
+                lab.border = !lab.border;
                 lab.draw_all(frame, false);
                 if let Some(ms) = lab.full(epd, frame, shadow) {
                     lab.values[0] = Some(ms);
                 }
-                lab.update_status(epd, frame, shadow);
+                // Show the new full-refresh time.
+                lab.draw_all(frame, false);
+                lab.partial(epd, frame, shadow, &[Rect::full()], "results");
             }
             Some(Press::OkLong) => lab.bench(epd, frame, shadow),
             None => break,
@@ -248,26 +254,14 @@ impl Lab {
         self.sel = (self.sel + step) % ROWS;
         self.draw_row(frame, old, false);
         self.draw_row(frame, self.sel, true);
-        if let Some(ms) = self.partial(
-            epd,
-            frame,
-            shadow,
-            &[row_rect(old), row_rect(self.sel)],
-            "cursor 2x",
-        ) {
-            self.values[5] = Some(ms);
-        }
-        self.update_status(epd, frame, shadow);
-    }
-
-    /// Redraw the status band with a partial refresh and remember its time.
-    fn update_status(&mut self, epd: &mut Epd, frame: &mut MonoFrame, shadow: &mut MonoFrame) {
+        // The status band shows the previous move's time and the partial count after
+        // this one, so it can go in the same window.
+        self.partials += 1;
         self.draw_status(frame, None);
-        let last = self.last;
-        self.status_ms = self.partial(epd, frame, shadow, &[STATUS], "status");
-        // The status band shows the refresh before it, not itself.
-        if self.status_ms.is_some() {
-            self.last = last;
+        self.partials -= 1;
+        let rect = row_rect(old.min(self.sel)).union(&STATUS);
+        if let Some(ms) = self.partial(epd, frame, shadow, &[rect], "cursor") {
+            self.values[5] = Some(ms);
         }
     }
 
@@ -337,7 +331,8 @@ impl Lab {
         self.draw_status(frame, asleep.then_some("Asleep. OK wakes."));
     }
 
-    fn draw_row(&self, frame: &mut MonoFrame, i: usize, inverted: bool) {
+    fn draw_row(&self, frame: &mut MonoFrame, i: usize, selected: bool) {
+        let inverted = selected && !self.border;
         let (bg, fg) = if inverted {
             (BinaryColor::On, BinaryColor::Off)
         } else {
@@ -347,7 +342,11 @@ impl Lab {
         let _ = Rectangle::new(Point::new(0, y), Size::new(400, ROW_H as u32))
             .into_styled(PrimitiveStyle::with_fill(bg))
             .draw(frame);
-        if !inverted {
+        if selected && self.border {
+            let _ = Rectangle::new(Point::new(2, y + 2), Size::new(396, ROW_H as u32 - 4))
+                .into_styled(PrimitiveStyle::with_stroke(fg, 4))
+                .draw(frame);
+        } else if !inverted {
             // Thin separator, so the row grid is visible.
             let _ = Rectangle::new(Point::new(0, y + ROW_H as i32 - 1), Size::new(400, 1))
                 .into_styled(PrimitiveStyle::with_fill(fg))
@@ -396,9 +395,7 @@ impl Lab {
         }
         let mut l2: heapless::String<48> = heapless::String::new();
         let _ = write!(l2, "Partials: {}", self.partials);
-        if let Some(ms) = self.status_ms {
-            let _ = write!(l2, "  status {ms} ms");
-        }
+        let _ = l2.push_str(if self.border { "  border" } else { "  inverted" });
         let _ = Text::new(&l1, Point::new(10, top + 25), ink).draw(frame);
         let _ = Text::new(&l2, Point::new(10, top + 50), ink).draw(frame);
     }
