@@ -148,6 +148,28 @@ impl Playout {
     }
 }
 
+/// Timing of the streaming loop while recording or playing, logged at the end of each.
+/// A slow pass or a nearly full RX / nearly empty TX ring explains dropouts.
+#[derive(Default)]
+struct LoopStats {
+    /// Longest time between two passes of the main loop, in µs.
+    max_pass_us: u64,
+    /// Most bytes popped from RX in one pass (the ring holds `DMA_BYTES`).
+    max_rx_bytes: usize,
+    /// Most bytes pushed to TX in one pass (the TX ring was this empty).
+    max_tx_bytes: usize,
+    stalls: u32,
+}
+
+impl LoopStats {
+    fn log(&self, what: &str) {
+        info!(
+            "{what} loop: max pass {} us, max rx {} B, max tx {} B (ring {} B), stalls {}",
+            self.max_pass_us, self.max_rx_bytes, self.max_tx_bytes, DMA_BYTES, self.stalls
+        );
+    }
+}
+
 /// The two streaming DMA transfers. Kept together so a stall can restart both.
 struct Streams {
     rx: Option<RxTransfer>,
@@ -348,8 +370,18 @@ fn main() -> ! {
     let mut last_rx = Instant::now();
     let mut going_to_sleep = false;
     let mut rx_scratch = [0u8; DMA_CHUNK];
+    let mut stats = LoopStats::default();
+    let mut last_pass = Instant::now();
+    // Dump the recording over serial once its playback ends (see `dump_recording`).
+    let mut dump_slot: Option<usize> = None;
 
     loop {
+        let pass = Instant::now();
+        if mode != Mode::Idle {
+            stats.max_pass_us = stats.max_pass_us.max((pass - last_pass).as_micros());
+        }
+        last_pass = pass;
+
         // RX: drain the ring; keep frames while recording.
         let mut got = 0;
         loop {
@@ -374,15 +406,20 @@ fn main() -> ! {
             }
         }
         let now = Instant::now();
+        if mode != Mode::Idle {
+            stats.max_rx_bytes = stats.max_rx_bytes.max(got);
+        }
         if got > 0 {
             last_rx = now;
         } else if now - last_rx > STALL {
             error!("I2S stalled, restarting the streams");
+            stats.stalls += 1;
             streams.restart();
             last_rx = Instant::now();
         }
 
         // TX: keep the ring full.
+        let mut sent = 0;
         loop {
             let tx = streams.tx();
             let n = tx.push_with(|buf| {
@@ -413,14 +450,32 @@ fn main() -> ! {
             if n == 0 {
                 break;
             }
+            sent += n;
+        }
+        if mode != Mode::Idle {
+            stats.max_tx_bytes = stats.max_tx_bytes.max(sent);
         }
 
         // Playback finished?
-        if let Mode::Playing { pos, .. } = mode
+        if let Mode::Playing { pos, slot } = mode
             && pos >= rec.len()
         {
             info!("playback done");
+            stats.log("playback");
+            stats = LoopStats::default();
             mode = Mode::Idle;
+            dump_slot = Some(slot);
+        }
+        // Dump only once the speaker is quiet: printing blocks the loop.
+        if let Some(slot) = dump_slot
+            && out.drained()
+        {
+            dump_slot = None;
+            dump_recording(&rec, slot);
+            // The rings ran unattended while printing.
+            streams.restart();
+            last_rx = Instant::now();
+            last_pass = Instant::now();
         }
         // Recording reached the cap?
         if matches!(mode, Mode::Recording { .. }) && rec.len() >= MAX_RECORD_FRAMES {
@@ -456,6 +511,8 @@ fn main() -> ! {
                         out.queue(beeps::ERROR);
                     } else {
                         info!("recording");
+                        stats = LoopStats::default();
+                        dump_slot = None;
                         rec.clear();
                         levels = SlotLevels::default();
                         audio.set_speaker(true);
@@ -472,6 +529,8 @@ fn main() -> ! {
                     last_activity = now;
                     ok_needs_release = false;
                     if matches!(mode, Mode::Recording { .. }) {
+                        stats.log("recording");
+                        stats = LoopStats::default();
                         mode = stop_recording(&mut out, &mut audio, &mut led, &rec, &levels);
                     }
                 }
@@ -504,7 +563,11 @@ fn main() -> ! {
                 }
             }
 
-            if mode == Mode::Idle && now - last_activity > IDLE_SLEEP && !ok.down {
+            if mode == Mode::Idle
+                && dump_slot.is_none()
+                && now - last_activity > IDLE_SLEEP
+                && !ok.down
+            {
                 info!("idle for {} s, going to sleep", IDLE_SLEEP.as_secs());
                 audio.set_speaker(true);
                 out.queue(beeps::SLEEP);
@@ -549,4 +612,28 @@ fn stop_recording(
     } else {
         Mode::Playing { pos: 0, slot }
     }
+}
+
+/// Print the recorded slot over serial, for analysis on a PC (`tools/pcm-from-log.py`):
+/// `PCM-START <frames> <rate> <slot>`, then `PCM <first frame> <hex i16 LE …>` lines of 32
+/// samples, then `PCM-END <sum>` with the wrapping sum of all samples as u16, so lost or
+/// broken lines show up.
+fn dump_recording(rec: &[u32], slot: usize) {
+    use core::fmt::Write as _;
+    esp_println::println!("PCM-START {} {} {}", rec.len(), SAMPLE_RATE, slot);
+    let mut sum: u16 = 0;
+    for (i, chunk) in rec.chunks(32).enumerate() {
+        let mut line: heapless::String<160> = heapless::String::new();
+        let _ = write!(line, "PCM {}", i * 32);
+        let _ = line.push(' ');
+        for raw in chunk {
+            let (a, b) = slots(raw.to_le_bytes());
+            let s = if slot == 0 { a } else { b };
+            sum = sum.wrapping_add(s as u16);
+            let [lo, hi] = s.to_le_bytes();
+            let _ = write!(line, "{lo:02x}{hi:02x}");
+        }
+        esp_println::println!("{}", line);
+    }
+    esp_println::println!("PCM-END {}", sum);
 }
