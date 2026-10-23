@@ -1,0 +1,26 @@
+# Vendor files used for the hardware research (docs/vendor/RESEARCH_NOTES.md).
+# They belong to their owners (ZECTRIX / Zectrix Lab, Solomon Systech, Espressif, NXP) and are
+# NOT redistributed in this repository. `just fetch-vendor` downloads them into docs/vendor/
+# (git-ignored) and checks the SHA-256 recorded at research time (2026-09-24).
+# A changed hash means the vendor updated the file: compare before trusting either.
+# url "-" = no stable public URL; place the file by hand (source given in the comment).
+#
+# path (under docs/vendor/)                                          sha256                                                            url
+common/schematics/sch_zectrix_note4_developer_kit_v1.0_en.pdf       ac81a4d44439c5ba1cd1cc47cf138ac6e57f954af1196fd39ae0b62ebf45d040  https://wiki.zectrix.com/sch_zectrix_note4_developer_kit_v1.0_en.pdf
+common/datasheets/ESP32-S3_datasheet_en.pdf                         2d5a7cb7fd559d8d972bd88db32669c0196d23f22d7afaafb0f63d099b589a3f  https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf
+common/datasheets/PCF8563.pdf                                       2ed5d1b0a1051d0e81399417c4ff0ced0658fa36e13c0487670f9cb6dfb4f1d4  https://www.nxp.com/docs/en/data-sheet/PCF8563.pdf
+common/datasheets/NT3H2111_2211.pdf                                 44a7cbee1220999138538341392aacde5a87aed7a284974328e8297b132a20c8  https://www.nxp.com/docs/en/data-sheet/NT3H2111_2211.pdf
+# SSD2683 rev 0.20 "proposal": a public download on Good Display's "IC driver" page
+# (www.good-display.com), no login and no confidentiality marking. No stable direct URL,
+# so download it from that page and place it here by hand.
+common/datasheets/SSD2683_0.20_proposal.pdf                         d4c6d5a2ad630e4887011338f3363d38c22450db73fa1e36178fdbfd0011f8c5  -
+common/images/device.png                                            e1aff710a528eba04838af7035e7c4c8f3e4ec5509a19499e5811b25d0cbf825  https://wiki.zectrix.com/device.png
+common/images/pc.jpg                                                8b32c2ca4f2bff4a6cee0d9688242726d719b3c20492c263fc3405144b183024  https://wiki.zectrix.com/pc.jpg
+common/images/qsg.jpg                                               ac5b2fa3aaa2a465be8ed43ae06763493846464d93c3c7b2294302bb5230ec36  https://wiki.zectrix.com/qsg.jpg
+common/images/qsg2.jpg                                              d7b012c79114d86aff1e2e0100cdd75ef07b5907b144bd7d031fb51d49e6db23  https://wiki.zectrix.com/qsg2.jpg
+note4/images/note4-devkit-controls-ports-en.png                     f9f34380a71dabadb60cf0dfd3d878218c55876f78f806186a83df9b67dc07b2  https://wiki.zectrix.com/note4-devkit-controls-ports-en.png
+note4c/images/note4c-devkit-controls-ports-en.png                   09bfeaf6f5ced25240962d717115bfff3a047d72289e3efade0973f5cefe161a  https://wiki.zectrix.com/note4c-devkit-controls-ports-en.png
+# Official NOTE4 demo image (MIT source: itopinion/zectrix-note4-epd-demo, release v1.0.0)
+note4/firmware/zectrix-note4-epd-demo-v1.0.0.bin                    a3649af0692987bd21ec815b224166c36bd91aa266657c7628a393cad1318072  https://github.com/itopinion/zectrix-note4-epd-demo/releases/download/v1.0.0/zectrix-note4-epd-demo-v1.0.0.bin
+# Official NOTE4C merged factory-style image (wiki NOTE4C quick start)
+note4c/firmware/notellm-2bp-v6.5.9-2bp-3fbbabb-20260705-mergebin.bin 26f209f7cdea8f62bff73f2e877e3ab421917c17497a2a23340129c6ef43fc36  https://wiki.zectrix.com/notellm-2bp-v6.5.9-2bp-3fbbabb-20260705-mergebin.bin

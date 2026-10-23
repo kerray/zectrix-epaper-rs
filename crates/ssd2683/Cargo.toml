@@ -1,0 +1,15 @@
+[package]
+name = "ssd2683"
+version = "0.1.0"
+edition.workspace = true
+description = "no_std driver for the Solomon Systech SSD2683 e-paper controller (ZECTRIX NOTE4 mono / NOTE4C black-white-yellow-red)"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-graphics-core = "0.4"
+
+[features]
+default = []

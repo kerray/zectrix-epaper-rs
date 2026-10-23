@@ -1,0 +1,4 @@
+# The ESP32-S3 is Xtensa: it needs the esp-rs toolchain installed by `espup install`.
+# The same toolchain also builds and tests the host crates.
+[toolchain]
+channel = "esp"

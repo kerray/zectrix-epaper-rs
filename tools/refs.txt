@@ -1,0 +1,15 @@
+# name  url  branch  (commit at research time, 2026-09-24)
+Paperwake https://github.com/alexclmy/Paperwake.git main 46117e3
+emini-home https://github.com/fiedoruk/emini-home.git main afd1239
+fourcolor-eink-firmware https://github.com/DennisGaida/fourcolor-eink-firmware.git dev 9b5411d
+inkwash-firmware https://github.com/counhopig/inkwash-firmware.git main 584db0a
+today-is-friday https://github.com/eyaeya/today-is-friday.git main 5e4c659
+transitink-os https://github.com/Zerie55699/transitink-os.git main 25bb433
+trmnl-firmware https://github.com/LitoMore/trmnl-firmware.git zectrix 76f89b0
+xiaozhi-esp32-upstream https://github.com/78/xiaozhi-esp32.git main 64b57d0
+xiaozhi-zectrix https://github.com/cattei/xiaozhi-zectrix.git zectrix 177c032
+youn-ink-fourcolor-firmware https://github.com/LazyYoun/youn-ink-fourcolor-firmware.git 2bp 8907e59
+zectrix-note4-epd-demo https://github.com/itopinion/zectrix-note4-epd-demo.git main ca285c9
+zectrix-note4-epd-lab https://github.com/Tinnci/zectrix-note4-epd-lab.git main a8371bf
+zectrix-note4-platform https://github.com/Tinnci/zectrix-note4-platform.git main 057440e
+zectrix-rs https://github.com/zzccppp/zectrix-rs.git master c9018e3

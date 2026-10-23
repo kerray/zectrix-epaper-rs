@@ -1,0 +1,37 @@
+[package]
+name = "zectrix-net"
+version = "0.1.0"
+edition.workspace = true
+description = "Wi-Fi station, HTTPS GET and a minimal HTTP/1.1 response parser for the ZECTRIX NOTE4 / NOTE4C"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+# Wi-Fi + TLS on the ESP32-S3. Without it only the host-testable HTTP parser builds.
+hal = [
+    "dep:esp-hal",
+    "dep:esp-radio",
+    "dep:esp-rtos",
+    "dep:embassy-executor",
+    "dep:embassy-net",
+    "dep:embassy-net-driver",
+    "dep:embassy-time",
+    "dep:mbedtls-rs",
+    "dep:log",
+    "dep:static_cell",
+]
+
+[dependencies]
+heapless.workspace = true
+esp-hal = { workspace = true, optional = true }
+esp-radio = { workspace = true, optional = true }
+esp-rtos = { workspace = true, optional = true }
+embassy-executor = { workspace = true, optional = true }
+embassy-net = { workspace = true, optional = true }
+embassy-net-driver = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
+mbedtls-rs = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+static_cell = { workspace = true, optional = true }

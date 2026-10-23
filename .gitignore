@@ -1,0 +1,16 @@
+/target/
+**/target/
+# Vendor files and reference clones are not redistributed: `just fetch-vendor`, `just fetch-refs`
+/docs/vendor/*
+!/docs/vendor/RESEARCH_NOTES.md
+# Flash backups contain Wi-Fi credentials and device keys. Never commit them.
+# .env holds the compile-time configuration (Wi-Fi, frame URL and key).
+/backups/
+*.bak.bin
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+.claude/

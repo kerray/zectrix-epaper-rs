@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Dummy build-time configuration so apps/note4c compiles; the image is never flashed.
+  WIFI_SSID: ci-dummy
+  WIFI_PASSWORD: ci-dummy-password
+  FRAME_URL: https://frames.example.com/frame?device=note4c
+  FRAME_KEY: ci-dummy-key
+
+jobs:
+  host-tests:
+    name: Host tests (driver + board logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          default: true
+          version: 1.97.0.0  # same as esp_toolchain in the justfile
+          buildtargets: esp32s3
+          ldproxy: false
+      - run: cargo test --locked --workspace --exclude note4 --exclude note4c
+      - run: cargo clippy --locked --workspace --exclude note4 --exclude note4c --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+
+  firmware:
+    name: Build firmware (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [note4, note4c]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          default: true
+          version: 1.97.0.0  # same as esp_toolchain in the justfile
+          buildtargets: esp32s3
+          ldproxy: false
+      - name: Build
+        working-directory: apps/${{ matrix.app }}
+        run: cargo build --locked --release
+      - name: Clippy
+        working-directory: apps/${{ matrix.app }}
+        run: cargo clippy --locked --release -- -D warnings

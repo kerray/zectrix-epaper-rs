@@ -1,0 +1,16 @@
+[package]
+name = "zectrix-board"
+version = "0.1.0"
+edition.workspace = true
+description = "Board support for the ZECTRIX NOTE4 / NOTE4C (ESP32-S3 N16R8, PCB V1.0): pin map, power latch, battery, buttons"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+# Hardware glue on top of esp-hal. Without it only the pure, host-testable parts build.
+hal = ["dep:esp-hal"]
+
+[dependencies]
+esp-hal = { workspace = true, optional = true }

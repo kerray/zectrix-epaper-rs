@@ -1,0 +1,10 @@
+# Read from a real NOTE4 devkit on 2026-10-23 (sha256 of 0x8000 page a82133fa...). Same slots as the
+# NOTE4C table (otadata 0xd000, ota_0 0x20000) with larger app slots and a 4 MiB assets partition.
+# ESP-IDF Partition Table
+# Name, Type, SubType, Offset, Size, Flags
+nvs,data,nvs,0x9000,16K,
+otadata,data,ota,0xd000,8K,
+phy_init,data,phy,0xf000,4K,
+ota_0,app,ota_0,0x20000,6080K,
+ota_1,app,ota_1,0x610000,6080K,
+assets,data,spiffs,0xc00000,4M,

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "apps/note4", "apps/note4c"]
+# `cargo test` at the root runs the host-testable crates only. The firmware apps build
+# for Xtensa from their own directories (see justfile), which carry the target config.
+default-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kerray/zectrix-epaper-rs"
+
+[workspace.dependencies]
+# Versions from esp-generate 1.4.0 (September 2026), see docs/RUST_RESEARCH.md.
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32s3", "println"] }
+esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+critical-section = "1.2.0"
+log = "0.4.27"
+embedded-graphics = "0.8.2"
+embedded-hal = "1.0"
+static_cell = "2.1.1"
+heapless = "0.9"
+ssd2683 = { path = "crates/ssd2683" }
+zectrix-board = { path = "crates/zectrix-board" }
+zectrix-net = { path = "crates/zectrix-net" }
+# Networking (M1), versions per docs/RUST_RESEARCH.md and the esp-mbedtls ESP example.
+esp-rtos = { version = "0.4.0", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc", "log-04"] }
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable", "log-04"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+embassy-net = { version = "0.9.1", features = ["proto-ipv4", "medium-ethernet", "dhcpv4", "tcp", "dns", "log"] }
+mbedtls-rs = { version = "0.3.0", features = ["esp32s3", "embassy-time", "log"] }
+embassy-net-driver = "0.2.0"
+tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
+
+[profile.dev]
+# The default debug profile is too slow and too big for the device.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
