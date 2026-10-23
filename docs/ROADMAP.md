@@ -107,8 +107,10 @@ engine such as Windmill or Node-RED, a Home Assistant add-on.
 ### M3: NOTE4 frame client and partial refresh
 
 - [ ] `apps/note4`: the same frame client in 1 bpp.
-- [ ] Driver: mono **partial refresh** (`0x83` window plus transition codes). The sequence is
-  documented in `vendor/RESEARCH_NOTES.md` §3.2. Measure it first (INTERACTIVE.md I1–I2).
+- [x] Driver: mono **partial refresh** (`0x83` window plus transition codes,
+  `Ssd2683::show_mono_partial`, host-tested; INTERACTIVE.md I1).
+- [ ] Measure it on hardware with the lab screen in `apps/note4` (INTERACTIVE.md I2; the app
+  is built, the numbers are not collected yet).
 - [ ] Interactive session, screen bundles and buttons (INTERACTIVE.md I3).
 
 ### M4 and later

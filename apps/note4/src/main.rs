@@ -1,10 +1,11 @@
 //! NOTE4 (black/white) bring-up firmware.
 //!
 //! On every boot it latches power, reads the battery, draws a black/white test card
-//! with a status line, refreshes the panel, switches the
-//! panel off and deep-sleeps. OK (GPIO0) or a 30-minute timer wakes it for the next
-//! refresh. The device keeps its power latch held; a real "power off" gesture is on the
-//! roadmap (docs/ROADMAP.md).
+//! with a status line and refreshes the panel. Unless the 30-minute timer woke it, it
+//! then waits 60 s for OK, which opens the partial-refresh lab ([`lab`],
+//! docs/INTERACTIVE.md). Then it switches the panel off and deep-sleeps. OK (GPIO0) or
+//! the timer wakes it again. The device keeps its power latch held; a real "power off"
+//! gesture is on the roadmap (docs/ROADMAP.md).
 
 #![no_std]
 #![no_main]
@@ -16,6 +17,8 @@
 )]
 
 use core::fmt::Write as _;
+
+mod lab;
 
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::{
@@ -29,6 +32,7 @@ use esp_hal::{
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     main,
+    rtc_cntl::WakeupSource,
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -36,7 +40,7 @@ use esp_hal::{
     time::{Duration, Rate},
 };
 use log::{error, info};
-use ssd2683::{MonoFrame, Panel, Ssd2683};
+use ssd2683::{MonoFrame, Panel, Ssd2683, Timing};
 use static_cell::ConstStaticCell;
 use zectrix_board::power::{self, Battery, PowerLatch};
 
@@ -44,6 +48,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// 15 000 bytes, kept out of the stack.
 static FRAME: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new());
+/// What is on the panel now, for partial refreshes (another 15 000 bytes).
+static SHADOW: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new());
 
 /// After a panic: device off on battery; on USB retry after this long.
 const PANIC_RETRY: Duration = Duration::from_secs(30 * 60);
@@ -54,6 +60,8 @@ fn custom_halt() -> ! {
 }
 
 const WAKE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// How long the test card waits for OK (lab screen) before deep sleep.
+const AWAKE: Duration = Duration::from_secs(60);
 
 #[main]
 fn main() -> ! {
@@ -62,13 +70,18 @@ fn main() -> ! {
     let _latch = PowerLatch::engage(p.GPIO17);
 
     esp_println::logger::init_logger_from_env();
-    info!("NOTE4 firmware {}", env!("CARGO_PKG_VERSION"));
+    let by_timer = esp_hal::system::wakeup_cause().contains(WakeupSource::Timer);
+    info!(
+        "NOTE4 firmware {} (timer wake {by_timer})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let delay = Delay::new();
     let mut led = Output::new(p.GPIO3, Level::Low, OutputConfig::default()); // on
     let pull_up = InputConfig::default().with_pull(Pull::Up);
     let mut ok = Input::new(p.GPIO0, pull_up);
     let down = Input::new(p.GPIO18, pull_up);
+    let up = Input::new(p.GPIO39, pull_up);
     let charging = Input::new(p.GPIO2, pull_up).is_low();
     let full = Input::new(p.GPIO1, InputConfig::default()).is_high();
 
@@ -84,7 +97,7 @@ fn main() -> ! {
     info!("battery {battery_mv:?} mV, charging {charging}, full {full}");
 
     let frame = FRAME.take();
-    draw(frame, battery_mv, charging, full);
+    draw(frame, battery_mv, charging, full, !by_timer);
 
     let spi = Spi::new(
         p.SPI3,
@@ -104,11 +117,22 @@ fn main() -> ! {
         Output::new(p.GPIO6, Level::Low, OutputConfig::default()),   // panel rail
         delay,
         Panel::Mono,
-    );
+    )
+    // 1 ms BUSY polling so the lab's timings are not rounded to 10 ms.
+    .with_timing(Timing {
+        poll_ms: 1,
+        ..Timing::default()
+    });
 
     let result = epd.power_on().and_then(|_| epd.show_mono(frame, None));
     if let Err(e) = &result {
         error!("display: {e:?}");
+    }
+    if !by_timer && result.is_ok() {
+        let mut buttons = lab::Buttons::new(&up, &down, &ok);
+        if lab::wait_press(&mut buttons, &delay, AWAKE) == Some(lab::Press::Ok) {
+            lab::run(&mut epd, frame, SHADOW.take(), &mut buttons, &delay);
+        }
     }
     let _ = epd.power_off();
     let (_spi, _cs, _dc, _rst, _busy, mut rail, _delay) = epd.release();
@@ -119,7 +143,7 @@ fn main() -> ! {
     power::deep_sleep(p.LPWR, &mut ok, Some(WAKE_INTERVAL))
 }
 
-fn draw(frame: &mut MonoFrame, battery_mv: Option<u32>, charging: bool, full: bool) {
+fn draw(frame: &mut MonoFrame, battery_mv: Option<u32>, charging: bool, full: bool, awake: bool) {
     let _ = frame.clear(BinaryColor::Off);
     let ink = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
 
@@ -173,5 +197,10 @@ fn draw(frame: &mut MonoFrame, battery_mv: Option<u32>, charging: bool, full: bo
         let _ = line.push_str(" full");
     }
     let _ = Text::new(&line, Point::new(20, 250), ink).draw(frame);
-    let _ = Text::new("OK = refresh", Point::new(20, 280), ink).draw(frame);
+    let hint = if awake {
+        "OK within 60 s = lab"
+    } else {
+        "OK = wake"
+    };
+    let _ = Text::new(hint, Point::new(20, 280), ink).draw(frame);
 }

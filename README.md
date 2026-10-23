@@ -5,7 +5,7 @@ Rust `no_std` firmware and drivers for two ZECTRIX e-paper devkits built on the 
 | App | Device | Panel | What it does |
 | --- | --- | --- | --- |
 | [`apps/note4c`](apps/note4c) | NOTE4C Devkit | 4.2" 400×300, black/white/yellow/red | **frame client**: wakes, fetches a server-rendered frame over HTTPS, shows it, deep-sleeps until the server's `X-Next-Refresh` |
-| [`apps/note4`](apps/note4) | NOTE4 Developer Kit | 4.2" 400×300, black/white | test card → deep sleep, wake on OK / 30 min (frame client and interactive screens planned) |
+| [`apps/note4`](apps/note4) | NOTE4 Developer Kit | 4.2" 400×300, black/white | test card, OK opens a partial-refresh lab screen; deep sleep, wake on OK / 30 min (frame client and interactive screens planned) |
 
 Both boards are the same V1.0 hardware: ESP32-S3 N16R8 and a Solomon **SSD2683** panel
 controller. Only the panel differs. The devices stay thin: rendering happens on a server you
@@ -13,7 +13,8 @@ run, following the small [frame protocol](docs/FRAME_PROTOCOL.md).
 
 **Status:** an earlier build of this client has run on a NOTE4C since early October 2026;
 the current `.env`-configurable build has not been flashed yet. The NOTE4 test card
-runs on hardware (since 2026-10-23); partial refresh and interactive screens are planned
+runs on hardware (since 2026-10-23); the driver does partial refresh (not yet measured on
+hardware) and the interactive screens are planned
 ([ROADMAP](docs/ROADMAP.md)).
 
 Not affiliated with ZECTRIX. "ZECTRIX", "NOTE4" and "NOTE4C" name the hardware this runs on.

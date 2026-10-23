@@ -5,8 +5,9 @@ item. Example screens: a calendar, home lights, weather, and the last voice answ
 code. This only works because the mono panel can redraw part of the screen. The four-colour
 NOTE4C stays a frame board with full refreshes only.
 
-Status: planned, 2026-10-23. Nothing below is measured yet; the numbers to collect are in
-"Measurements".
+Status, 2026-10-23: I1 (driver) is done and host-tested. I2 (lab screen in `apps/note4`) is
+built but not yet run on hardware, so nothing below is measured yet; the numbers to collect
+are in "Measurements".
 
 ## What the panel can do
 
@@ -22,13 +23,46 @@ sequence is in [vendor/RESEARCH_NOTES.md](vendor/RESEARCH_NOTES.md) §3.2.
     (`00` B→B, `01` B→W, `10` W→B, `11` W→W), followed by `04`, `12 00`, `02 00`.
 - **The driver must know the old image.** We keep a 15,000 B 1 bpp copy of what is on the
   panel (the "shadow"). Without a valid shadow, a partial refresh would draw garbage, so the
-  driver refuses and the caller does a full refresh. A failed or timed-out refresh
-  invalidates the shadow.
+  caller does a full refresh instead. A failed or timed-out refresh invalidates the shadow.
 - **Ghosting:** the vendor UI does a full refresh after **8** partial refreshes, and uses full
   refreshes for page changes. We follow the same rule.
 - **The "0.3 s" fast black/white waveform** in `ssd2683_waveform.h` is a full-screen external
   LUT. The vendor found it ghosts, so we do not use it for now.
 - **Speed is not published.** Measuring it is the first task (see "Measurements").
+
+## Driver API (I1)
+
+`crates/ssd2683`, no allocation; the caller owns both frames (2 × 15,000 B, e.g. in
+`static` cells):
+
+```rust
+// After a full refresh the shadow is a copy of the frame that was shown.
+epd.show_mono(&frame, None)?;
+shadow.copy_from(&frame);
+
+// Draw into `frame`, then refresh only the part that changed.
+if let Some(rect) = shadow.dirty_rect(&frame) {
+    match epd.show_mono_partial(&mut shadow, &frame, rect) {
+        Ok(_window) => {}              // `shadow` now matches the panel again
+        Err(_) => { /* shadow invalid: next update must be epd.show_mono(...) */ }
+    }
+}
+```
+
+- `show_mono_partial(&mut shadow, &new, rect) -> Result<Rect, Error>`: sends the window
+  `rect` widened to whole bytes (x down to a multiple of 8, the right edge up, at most 400)
+  and returns that window. The widened pixels also come from `new`. On success it copies the
+  window from `new` into `shadow`; on an error it leaves `shadow` alone, but the panel may
+  have changed, so the caller must treat the shadow as invalid.
+- It does the reset + OTP selection itself (the NOTE4 rule) and uses the same `04`/`12`/`02`
+  trigger and 120 s BUSY timeouts as a full refresh.
+- Errors: `WrongPanel` on the NOTE4C (nothing is sent), `InvalidRect` for an empty or
+  off-panel rectangle (nothing is sent), `NotPowered`, `BusyTimeout(stage)`.
+- Helpers: `Rect` (`aligned`, `union`, `is_valid`, `full`), `MonoFrame::dirty_rect`,
+  `copy_rect`, `copy_from`.
+- Host tests: `crates/ssd2683/tests/partial.rs` (exact sequence of a small window, all four
+  transition codes, alignment incl. the right edge, a full-screen window, refusal on NOTE4C,
+  invalid rectangles, shadow handling on success and on a timeout).
 
 ## Design: the server renders, the device moves the cursor
 
@@ -126,6 +160,47 @@ Transport, auth and the device-health headers are the same as the v1
 A test app on the NOTE4 does each refresh and draws its time on the panel. USB/IP logs are
 unreliable, see [FLASHING.md](FLASHING.md).
 
+### Lab screen (I2, `apps/note4`)
+
+1. Flash `apps/note4` (`just flash note4`). After a reset or an OK wake the test card
+   appears; its last line says "OK within 60 s = lab". (After a 30-minute timer wake it
+   sleeps at once.)
+2. Press **OK** within 60 s. The lab screen runs the benchmark at once:
+   1. full refresh → row 1 "Full refresh";
+   2. one 400×40 row (row 3 turns black) → row 2 "Partial 400x40";
+   3. rows 1 and 6 (160 px apart) as two calls → row 3 "2 rows, 2 calls";
+   4. the same two rows back as one 400×240 window → row 4 "2 rows, 1 window";
+   5. the whole screen as a partial (draws the results) → row 5 "Full-scr partial";
+   6. one more window (row 5 to the status band) to show that last value.
+3. Then:
+
+   | Button | Action |
+   | --- | --- |
+   | Up / Down | move the black highlight (wraps): two partial refreshes (old row, new row), then one of the status band. Row 6 "Cursor move (2x)" shows the time of the two row refreshes (updated when row 6 is redrawn). |
+   | OK | full refresh; row 1 gets the new time |
+   | OK held 1 s | run the benchmark again |
+   | nothing for 60 s | one full refresh ("Asleep. OK wakes."), then deep sleep |
+
+4. The status band shows the last refresh ("Last: cursor 2x 612 ms", "Last: full 2950 ms",
+   or "FAILED: …"), the number of partial refreshes since the last full refresh, and the
+   time of the status band's own partial refresh (400×60). There is **no automatic full
+   refresh**, so ghosting can be judged after 8, 16 and 32 partials (count them on the
+   status band). After a failed refresh the next update is a full refresh.
+
+Times are measured with `esp_hal::time::Instant` around the driver call, so they include the
+reset + OTP selection, the SPI transfer (20 MHz) and BUSY polling at 1 ms. Each value is the
+total of the calls listed.
+
+What to record after flashing (fill in the table below and take photos):
+
+- the five benchmark values (run the benchmark two or three times with OK held, they
+  should repeat);
+- the cursor-move time, and whether a move looks like one event or two visible steps;
+- ghosting after 8, 16 and 32 moves: photo of the screen in daylight, then press OK and
+  compare with the clean full refresh;
+- whether the unchanged rows flicker during a partial refresh (they should not);
+- whether Up (GPIO39) works while awake (it cannot wake the chip).
+
 | Case | Time | Ghosting |
 | --- | --- | --- |
 | Full 1 bpp refresh (OTP) | ? | – |
@@ -147,7 +222,9 @@ whole rows.
   card (ROADMAP M0). Done 2026-10-23.
 - **I1, driver:** `Ssd2683::show_mono_partial` with the shadow and transition encoding;
   host tests of the command sequence and the encoding against the official driver.
-- **I2, measurement app:** the table above, filled in.
+  **Done** (2026-10-23).
+- **I2, measurement app:** the table above, filled in. The lab screen is built (see "Lab
+  screen"); the hardware run is open.
 - **I3, session + protocol:** button handling, the 60 s session, and the bundle/patch parser
   (host-tested); an example server with a dummy list.
 - **I4, screens:** an action screen (lights), then a calendar and the screen list.
