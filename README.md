@@ -25,11 +25,12 @@ Not affiliated with ZECTRIX. "ZECTRIX", "NOTE4" and "NOTE4C" name the hardware t
 crates/ssd2683        SSD2683 driver: 4-colour + mono full refresh, embedded-graphics frames (host-tested)
 crates/zectrix-board  pin map, battery maths (host-tested); `hal` feature: power latch, ADC, deep sleep
 crates/zectrix-net    Wi-Fi station, HTTPS GET (mbedtls-rs), HTTP/1.x head + URL parser, dotenv reader (host-tested)
+crates/zectrix-screen NOTE4 interactive screens: bundle/patch parser, cursor, refresh policy, buttons, session (host-tested)
 apps/note4c           NOTE4C frame client
 apps/note4            NOTE4 test card
 partitions/           factory 16 MB partition tables of the NOTE4C and the NOTE4 devkit
 docs/                 hardware, flashing, frame protocol, roadmap, research notes
-tools/                reference-repo list, vendor file list (URLs + SHA-256), fetch scripts
+tools/                reference-repo list, vendor file list (URLs + SHA-256), fetch scripts, screen-bundle.py
 ```
 
 ## Quick start

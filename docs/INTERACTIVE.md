@@ -7,7 +7,8 @@ NOTE4C stays a frame board with full refreshes only.
 
 Status, 2026-10-23: I1 (driver) is done and host-tested. I2 (lab screen in `apps/note4`) is
 built but not yet run on hardware, so nothing below is measured yet; the numbers to collect
-are in "Measurements".
+are in "Measurements". The host-testable part of I3 (bundle and patch parser, cursor,
+refresh policy, buttons, session timer) is in `crates/zectrix-screen`, see "Device logic".
 
 ## What the panel can do
 
@@ -134,26 +135,81 @@ screen but too slow for every Up/Down press. So:
 ## Protocol (draft v2)
 
 Transport, auth and the device-health headers are the same as the v1
-[frame protocol](FRAME_PROTOCOL.md). `<base>` is a configured server URL.
+[frame protocol](FRAME_PROTOCOL.md). `<base>` is a configured server URL. All integers are
+**big-endian** (network order). Pixels are 1 bpp as in a NOTE4 frame: 1 = white, MSB =
+leftmost pixel, top line first, `w/8` bytes per line.
 
 - `GET <base>/screen?device=note4&screen=<id>` →
   `application/x-note4-screen`, with `ETag` and `X-Next-Refresh` as in v1:
 
   ```
-  "N4S1"  u8 version=1  u8 flags  u8 n_rows  u8 selected
-  15000 B base frame (1 bpp, 1 = white, MSB = left)
-  n_rows × { u16 x, u16 y, u16 w, u16 h  (x and w multiples of 8)
-             w/8 × h B highlight strip }
+  offset  size
+  0       4      "N4S1"
+  4       1      version = 1
+  5       1      flags: bit 0 = row 0 is a non-selectable header; other bits must be 0
+  6       1      n_rows, at most 32
+  7       1      selected: index of the selected row (0 if no row is selectable)
+  8       15000  base frame, every row drawn unselected
+  15008   …      n_rows × { u16 x, u16 y, u16 w, u16 h
+                            w/8 × h B highlight strip (the row drawn selected) }
   ```
+
+  - `x` and `w` are multiples of 8, and the rectangle lies inside 400×300.
+  - Every selectable row has a non-empty rectangle. A header row may have an empty one
+    (`w` or `h` = 0, no strip bytes); its strip is never shown.
+  - The body ends right after the last strip (`Content-Length` = the bundle length).
+  - Rows may be anywhere; the cursor moves in index order and wraps.
+  - The device rejects anything else (wrong magic or version, unknown flags, a bad
+    rectangle or `selected`, a short or long body) and keeps the current screen.
 
   A full-width 40 px row strip is 2,000 B, so a 10-row list is about 35 KB in total.
 - `POST <base>/event` with `{"screen":…, "row":…, "action":"ok"}` → one of:
   - `200` + a new screen bundle;
-  - `200` + `application/x-note4-patch`: `u16 x, y, w, h` + 1 bpp pixels. This patch replaces
-    that area in the base frame and in the row's strip, so a later cursor move does not
-    restore the stale row.
+  - `200` + `application/x-note4-patch`:
+
+    ```
+    u16 x, u16 y, u16 w, u16 h     x and w multiples of 8, non-empty, inside 400×300
+    w/8 × h B   pixels             the area drawn unselected
+    [w/8 × h B  highlighted]       optional: the area drawn as a selected row
+    ```
+
+    The body is 8 + n or 8 + 2n bytes (n = w/8 × h); the length says whether the
+    highlighted plane is there. The pixels replace that area in the base frame; the
+    highlighted plane (or the pixels, if there is none) replaces it in every row strip the
+    area overlaps. So a later cursor move does not restore a stale row, and a patch of the
+    selected row keeps its highlight when the server sends both planes. With one plane the
+    selected row shows the patch as drawn until the cursor leaves and comes back.
   - `204`: nothing to show.
 - Row 0 can be a non-selectable header (`flags` bit 0).
+
+A reference renderer for both formats is `tools/screen-bundle.py` (Pillow): a title and a
+list of rows → `.n4s`, or one row → a two-plane patch. `cargo run -p zectrix-screen
+--example n4s-check -- FILE [out.pbm]` checks a file the way the device does and can write
+the screen as a PBM image.
+
+## Device logic (I3, `crates/zectrix-screen`)
+
+`no_std`, no allocation, no hardware; depends on `ssd2683` for `MonoFrame` and `Rect`.
+The firmware owns three buffers: the bundle bytes (downloaded into PSRAM), the target
+`frame` and the driver's `shadow`.
+
+| Part | API | Behaviour |
+| --- | --- | --- |
+| Bundle | `Layout::parse(&[u8])`, `Screen::new(&mut [u8])` | validates the whole body once; `Screen` keeps the row table and the selection and works on the downloaded bytes in place |
+| Show | `Screen::compose(&mut frame)`, `compose_rect` | base + selected strip, for the full refresh of a new screen |
+| Cursor | `Screen::move_cursor(Move::Up/Down, &mut frame, Merge)`, `select(i, …)` | wraps, skips the header; writes the old row from the base and the new row from its strip into `frame`; returns `Dirty::{None, One, Two}` (old row first) |
+| Merge | `Merge::Never`, `Always`, `IfGapAtMost(px)` | two calls or one union window; the choice waits for the measurements below |
+| Patch | `Patch::parse(&[u8])`, `Screen::apply_patch(&patch, &mut frame) -> Rect` | writes into the bundle buffer (base + overlapping strips) and into `frame`; returns the rectangle to refresh |
+| Ghosting | `RefreshPolicy` (`plan(Update) -> Full/Partial`, `partial_done(ok)`, `full_done(ok)`, `full_before_sleep()`) | new screen = full; change = partial while the shadow is valid and < 8 partials (configurable) since the last full; a failed refresh forces a full one; before sleep, one full refresh if any partial was attempted (or the last full failed) |
+| Buttons | `Buttons::input(button, pressed, t_ms)`, `poll(t_ms) -> Option<Event>`, `next_deadline()` | 30 ms debounce, timed from the raw edge; events per the table above (`Up`, `Down`, `Select`, `TalkStart`/`TalkEnd`, `Back`, `Off`); works with polling or edge interrupts; `ignore_until_release` for the button that woke the chip |
+| Session | `Session::new(now, 60_000)`, `touch`, `should_sleep` | idle timeout |
+
+Defaults to confirm on hardware: Up/Down fire on **release** (a short press is one released
+within 1 s; `ButtonConfig::move_on_press` fires on the press instead, at the cost of a
+cursor move before Back/Off); a Down press released between 1 s and 3 s does nothing.
+
+Not done yet (I3): wiring into `apps/note4` (waits for the I2 measurements), the HTTP
+client for `/screen` and `/event`, and an example server with a dummy list.
 
 ## Measurements (first hardware task)
 
@@ -226,6 +282,8 @@ whole rows.
 - **I2, measurement app:** the table above, filled in. The lab screen is built (see "Lab
   screen"); the hardware run is open.
 - **I3, session + protocol:** button handling, the 60 s session, and the bundle/patch parser
-  (host-tested); an example server with a dummy list.
+  (host-tested); an example server with a dummy list. The host-tested core is done
+  (`crates/zectrix-screen`, `tools/screen-bundle.py`); firmware wiring, the HTTP part and
+  the example server are open.
 - **I4, screens:** an action screen (lights), then a calendar and the screen list.
 - **I5, last answer:** after the voice track, the answer record and the QR screen.

@@ -12,6 +12,7 @@ build their own thing on these boards. Read `README.md` first, then `docs/HARDWA
 | `crates/ssd2683` | panel driver: full refresh, mono + 4-colour frames, embedded-graphics (host-tested) |
 | `crates/zectrix-board` | pin map, battery maths; `hal` feature: power latch, ADC, deep sleep |
 | `crates/zectrix-net` | Wi-Fi, HTTPS GET, HTTP parser, dotenv reader (parser parts host-tested) |
+| `crates/zectrix-screen` | NOTE4 interactive screens: bundle/patch parser, cursor, refresh policy, buttons, session (no hardware, host-tested; `docs/INTERACTIVE.md`) |
 | `apps/note4c` | NOTE4C frame client (fetches a finished frame, shows it, sleeps) |
 | `apps/note4` | NOTE4 test card; the simplest template for a new app |
 | `partitions/` | factory partition tables of both devices |
