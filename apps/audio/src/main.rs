@@ -178,6 +178,12 @@ impl LoopStats {
 struct Streams {
     rx: Option<RxTransfer>,
     tx: Option<TxTransfer>,
+    /// Bytes of an RX frame split across two pops. esp-hal starts RX with an EOF count
+    /// that is not a whole number of frames, so a DMA descriptor can end mid-frame.
+    /// Dropping the remainder shifted the stream by one sample, which swapped the two
+    /// slots every 1024 frames (measured: playback of one slot had 60 ms gaps).
+    rx_partial: [u8; FRAME_BYTES],
+    rx_partial_len: usize,
 }
 
 impl Streams {
@@ -194,11 +200,28 @@ impl Streams {
         Self {
             rx: Some(rx),
             tx: Some(tx),
+            rx_partial: [0; FRAME_BYTES],
+            rx_partial_len: 0,
         }
     }
 
-    fn rx(&mut self) -> &mut RxTransfer {
-        self.rx.as_mut().expect("rx running")
+    /// Pop what RX has into `scratch` and hand each whole frame to `frame`, keeping a
+    /// frame split across pops for the next call. Returns the bytes popped.
+    fn pop_frames(
+        &mut self,
+        scratch: &mut [u8],
+        mut frame: impl FnMut([u8; FRAME_BYTES]),
+    ) -> usize {
+        let n = self.rx.as_mut().expect("rx running").pop(scratch);
+        for &b in &scratch[..n] {
+            self.rx_partial[self.rx_partial_len] = b;
+            self.rx_partial_len += 1;
+            if self.rx_partial_len == FRAME_BYTES {
+                self.rx_partial_len = 0;
+                frame(self.rx_partial);
+            }
+        }
+        n
     }
 
     fn tx(&mut self) -> &mut TxTransfer {
@@ -391,25 +414,22 @@ fn main() -> ! {
         // RX: drain the ring; keep frames while recording.
         let mut got = 0;
         loop {
-            let n = streams.rx().pop(&mut rx_scratch);
+            let n = streams.pop_frames(&mut rx_scratch, |bytes| {
+                let Mode::Recording { skip } = &mut mode else {
+                    return;
+                };
+                if *skip > 0 {
+                    *skip -= 1;
+                } else if rec.len() < MAX_RECORD_FRAMES {
+                    let (a, b) = slots(bytes);
+                    levels.add(a, b);
+                    rec.push(u32::from_le_bytes(bytes));
+                }
+            });
             if n == 0 {
                 break;
             }
             got += n;
-            if let Mode::Recording { skip } = &mut mode {
-                for f in rx_scratch[..n - n % FRAME_BYTES].chunks_exact(FRAME_BYTES) {
-                    if *skip > 0 {
-                        *skip -= 1;
-                        continue;
-                    }
-                    if rec.len() < MAX_RECORD_FRAMES {
-                        let bytes = [f[0], f[1], f[2], f[3]];
-                        let (a, b) = slots(bytes);
-                        levels.add(a, b);
-                        rec.push(u32::from_le_bytes(bytes));
-                    }
-                }
-            }
         }
         let now = Instant::now();
         if mode != Mode::Idle {
