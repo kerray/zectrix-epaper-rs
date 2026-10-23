@@ -124,6 +124,18 @@ impl<'a, 'd> Buttons<'a, 'd> {
 }
 
 /// Wait up to `timeout` for a press.
+/// Wait up to `timeout` for `want`, ignoring other presses. True if it came.
+pub fn wait_for(buttons: &mut Buttons, delay: &Delay, timeout: Duration, want: Press) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if buttons.poll() == Some(want) {
+            return true;
+        }
+        delay.delay_millis(10);
+    }
+    false
+}
+
 pub fn wait_press(buttons: &mut Buttons, delay: &Delay, timeout: Duration) -> Option<Press> {
     let start = Instant::now();
     while start.elapsed() < timeout {

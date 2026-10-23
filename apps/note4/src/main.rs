@@ -97,7 +97,9 @@ fn main() -> ! {
     info!("battery {battery_mv:?} mV, charging {charging}, full {full}");
 
     let frame = FRAME.take();
-    draw(frame, battery_mv, charging, full, !by_timer);
+    // Raw button levels on the card (1 = released), to check the pins on new hardware.
+    let levels = [up.is_high(), down.is_high(), ok.is_high()];
+    draw(frame, battery_mv, charging, full, !by_timer, levels);
 
     let spi = Spi::new(
         p.SPI3,
@@ -130,7 +132,9 @@ fn main() -> ! {
     }
     if !by_timer && result.is_ok() {
         let mut buttons = lab::Buttons::new(&up, &down, &ok);
-        if lab::wait_press(&mut buttons, &delay, AWAKE) == Some(lab::Press::Ok) {
+        // Only OK opens the lab. Up/Down are ignored here: GPIO18 doubles as the power key
+        // and may read low, which used to end the wait at once and send the device to sleep.
+        if lab::wait_for(&mut buttons, &delay, AWAKE, lab::Press::Ok) {
             lab::run(&mut epd, frame, SHADOW.take(), &mut buttons, &delay);
         }
     }
@@ -143,7 +147,14 @@ fn main() -> ! {
     power::deep_sleep(p.LPWR, &mut ok, Some(WAKE_INTERVAL))
 }
 
-fn draw(frame: &mut MonoFrame, battery_mv: Option<u32>, charging: bool, full: bool, awake: bool) {
+fn draw(
+    frame: &mut MonoFrame,
+    battery_mv: Option<u32>,
+    charging: bool,
+    full: bool,
+    awake: bool,
+    levels: [bool; 3],
+) {
     let _ = frame.clear(BinaryColor::Off);
     let ink = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
 
@@ -203,4 +214,8 @@ fn draw(frame: &mut MonoFrame, battery_mv: Option<u32>, charging: bool, full: bo
         "OK = wake"
     };
     let _ = Text::new(hint, Point::new(20, 280), ink).draw(frame);
+    let mut pins: heapless::String<16> = heapless::String::new();
+    let [u, d, o] = levels.map(u8::from);
+    let _ = write!(pins, "U{u} D{d} OK{o}");
+    let _ = Text::new(&pins, Point::new(260, 280), ink).draw(frame);
 }
