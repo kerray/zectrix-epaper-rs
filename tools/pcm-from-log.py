@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Turn the `audio` app's serial PCM dump into a WAV file and report on it.
+"""Turn a recording from the `audio` app into a WAV file and report on it.
 
-Usage: pcm-from-log.py LOG [OUT.wav]
+Usage: pcm-from-log.py INPUT [OUT.wav]
+
+INPUT is either the flash copy the app saves after each playback (starts with `ZPCM`):
+
+    espflash read-flash -p /dev/ttyACM0 -c esp32s3 --after no-reset 0x610000 0x200000 rec.bin
+
+(the start of the `ota_1` partition; 2 MiB covers 30 s), or a serial log with a
+`PCM-START` dump from an older build.
 
 The app prints `PCM-START <frames> <rate> <mic slot>`, lines `PCM <first frame> <hex>`
 with 32 raw stereo frames each (slot 0 then slot 1, little-endian i16), and
@@ -55,6 +62,16 @@ def parse(path):
     return dumps[-1]
 
 
+def parse_bin(data):
+    """The flash copy: "ZPCM", frames, rate, mic slot (u32 LE), then raw stereo frames."""
+    frames, rate, slot = struct.unpack_from("<III", data, 4)
+    body = data[16 : 16 + 4 * frames]
+    if len(body) < 4 * frames:
+        sys.exit(f"file holds {len(body) // 4} of {frames} frames; read more flash")
+    samples = list(struct.unpack(f"<{2 * frames}h", body))
+    return {"frames": frames, "rate": rate, "slot": slot}, samples
+
+
 def samples_of(dump):
     """Interleaved stereo samples and the number of lost lines."""
     n = dump["frames"]
@@ -83,14 +100,21 @@ def goertzel_db(block, rate, freq):
 def main():
     if len(sys.argv) not in (2, 3):
         sys.exit(__doc__)
-    dump = parse(sys.argv[1])
     out_path = sys.argv[2] if len(sys.argv) == 3 else "recording.wav"
-    both, missing = samples_of(dump)
+    with open(sys.argv[1], "rb") as f:
+        head = f.read(4)
+    if head == b"ZPCM":
+        with open(sys.argv[1], "rb") as f:
+            dump, both = parse_bin(f.read())
+    else:
+        dump = parse(sys.argv[1])
+        both, missing = samples_of(dump)
+        total = sum(both) & 0xFFFF
+        print(f"lines missing: {missing}; "
+              f"sum {'OK' if total == dump['sum'] else 'MISMATCH'}")
     rate = dump["rate"]
-    total = sum(both) & 0xFFFF
     print(f"{len(both) // 2} frames, {len(both) / 2 / rate:.2f} s at {rate} Hz, "
           f"mic slot {dump['slot']}")
-    print(f"lines missing: {missing}; sum {'OK' if total == dump['sum'] else 'MISMATCH'}")
 
     with wave.open(out_path, "wb") as w:
         w.setnchannels(2)

@@ -30,7 +30,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use es8311::{Config as CodecConfig, Es8311};
+use esp_bootloader_esp_idf::partitions;
 use esp_backtrace as _;
+use esp_storage::FlashStorage;
 use esp_hal::{
     Blocking,
     clock::CpuClock,
@@ -43,7 +45,6 @@ use esp_hal::{
         Channels, DataFormat, I2s, I2sRx, I2sRxDmaTransfer, I2sTx, I2sTxDmaTransfer, TdmConfig,
     },
     main,
-    usb::usb_serial_jtag::UsbSerialJtag,
     psram::{Psram, PsramConfig, PsramMode},
     time::{Duration, Instant, Rate},
 };
@@ -272,8 +273,8 @@ fn main() -> ! {
     info!("PSRAM {} KiB", psram_size / 1024);
 
     let delay = Delay::new();
-    // For the PCM dump; the logger keeps writing to the same FIFO.
-    let mut usb = UsbSerialJtag::new(p.USB_DEVICE);
+    // For saving the last recording to the spare ota_1 slot (see `save_recording`).
+    let mut flash = FlashStorage::new(p.FLASH);
     let mut led = Output::new(p.GPIO3, Level::High, OutputConfig::default()); // off
     let pull_up = InputConfig::default().with_pull(Pull::Up);
     let mut ok = Button::new(Input::new(p.GPIO0, pull_up));
@@ -375,8 +376,8 @@ fn main() -> ! {
     let mut rx_scratch = [0u8; DMA_CHUNK];
     let mut stats = LoopStats::default();
     let mut last_pass = Instant::now();
-    // Dump the recording over serial once its playback ends (see `dump_recording`).
-    let mut dump_slot: Option<usize> = None;
+    // Save the recording to flash once its playback ends (see `save_recording`).
+    let mut save_slot: Option<usize> = None;
 
     loop {
         let pass = Instant::now();
@@ -467,15 +468,25 @@ fn main() -> ! {
             stats.log("playback");
             stats = LoopStats::default();
             mode = Mode::Idle;
-            dump_slot = Some(slot);
+            save_slot = Some(slot);
         }
         // Dump only once the speaker is quiet: printing blocks the loop.
-        if let Some(slot) = dump_slot
+        if let Some(slot) = save_slot
             && out.drained()
         {
-            dump_slot = None;
-            dump_recording(&mut usb, &rec, slot);
-            // The rings ran unattended while printing.
+            save_slot = None;
+            audio.set_speaker(true);
+            match save_recording(&mut flash, &rec, slot) {
+                Ok(at) => {
+                    info!("recording saved at {at:#x}");
+                    out.queue(beeps::TICK);
+                }
+                Err(e) => {
+                    error!("saving the recording failed: {e}");
+                    out.queue(beeps::ERROR);
+                }
+            }
+            // The rings ran unattended while the flash was written.
             streams.restart();
             last_rx = Instant::now();
             last_pass = Instant::now();
@@ -515,7 +526,7 @@ fn main() -> ! {
                     } else {
                         info!("recording");
                         stats = LoopStats::default();
-                        dump_slot = None;
+                        save_slot = None;
                         rec.clear();
                         levels = SlotLevels::default();
                         audio.set_speaker(true);
@@ -567,7 +578,7 @@ fn main() -> ! {
             }
 
             if mode == Mode::Idle
-                && dump_slot.is_none()
+                && save_slot.is_none()
                 && now - last_activity > IDLE_SLEEP
                 && !ok.down
             {
@@ -617,68 +628,74 @@ fn stop_recording(
     }
 }
 
-/// Print the recording over USB serial, for analysis on a PC (`tools/pcm-from-log.py`):
-/// `PCM-START <frames> <rate> <mic slot>`, then `PCM <first frame> <hex>` lines of 32 raw
-/// stereo frames (slot 0 then slot 1, each i16 LE), then `PCM-END <sum>` with the wrapping
-/// u16 sum of all samples of both slots, so lost or broken lines show up.
+/// Header of a recording saved to flash; all fields little-endian u32.
+const SAVE_MAGIC: &[u8; 4] = b"ZPCM";
+
+/// Write the recording to the start of the `ota_1` partition, for analysis on a PC:
+/// `espflash read-flash 0x610000 <size> rec.bin`, then `tools/pcm-from-log.py rec.bin`.
+/// Logs over USB/IP lose most of a large dump; reading flash back does not.
 ///
-/// This bypasses `esp_println`, which drops all output after a FIFO wait of well under a
-/// millisecond; USB/IP to WSL is slower than that. Here each byte may wait up to a second,
-/// and the dump stops if no host drains the FIFO.
-fn dump_recording(usb: &mut UsbSerialJtag<'_, Blocking>, rec: &[u32], slot: usize) {
-    use core::fmt::Write as _;
-    info!("dumping {} frames over USB serial", rec.len());
-    let mut out = UsbOut { usb, ok: true };
-    let _ = writeln!(out, "PCM-START {} {} {}", rec.len(), SAMPLE_RATE, slot);
-    let mut sum: u16 = 0;
-    for (i, chunk) in rec.chunks(32).enumerate() {
-        let _ = write!(out, "PCM {} ", i * 32);
-        for raw in chunk {
-            let (a, b) = slots(raw.to_le_bytes());
-            sum = sum.wrapping_add(a as u16).wrapping_add(b as u16);
-            let [a0, a1] = a.to_le_bytes();
-            let [b0, b1] = b.to_le_bytes();
-            let _ = write!(out, "{a0:02x}{a1:02x}{b0:02x}{b1:02x}");
-        }
-        let _ = writeln!(out);
-        if !out.ok {
-            warn!("dump aborted: no host reading the USB serial port");
-            return;
-        }
-    }
-    let _ = writeln!(out, "PCM-END {sum}");
-    let start = Instant::now();
-    while out.usb.flush_tx_nb().is_err() && start.elapsed() < Duration::from_secs(1) {}
-}
+/// Layout: `"ZPCM"`, frames, sample rate, mic slot, then the raw stereo frames (slot 0 then
+/// slot 1, i16 LE). Returns the flash offset.
+///
+/// `ota_1` is the second app slot. It is only used if its first sector is blank or holds
+/// an earlier recording, so a real app image there is never overwritten. `otadata` is
+/// blank after `just flash`, so the bootloader never boots from `ota_1`.
+fn save_recording(
+    flash: &mut FlashStorage<'_>,
+    rec: &[u32],
+    slot: usize,
+) -> Result<u32, &'static str> {
+    let mut table = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(flash, &mut table)
+        .map_err(|_| "cannot read the partition table")?;
+    let part = pt
+        .find_partition(partitions::PartitionType::App(
+            partitions::AppPartitionSubType::Ota1,
+        ))
+        .map_err(|_| "bad partition table")?
+        .ok_or("no ota_1 partition")?;
+    let (base, len) = (part.offset(), part.len());
 
-/// Blocking USB serial output with a per-byte timeout; `ok` turns false on the first one.
-struct UsbOut<'a, 'd> {
-    usb: &'a mut UsbSerialJtag<'d, Blocking>,
-    ok: bool,
-}
-
-impl core::fmt::Write for UsbOut<'_, '_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        const BYTE_TIMEOUT: Duration = Duration::from_secs(1);
-        for &b in s.as_bytes() {
-            if !self.ok {
-                return Err(core::fmt::Error);
-            }
-            let start = Instant::now();
-            loop {
-                match self.usb.write_byte_nb(b) {
-                    Ok(()) => break,
-                    // The FIFO is full; it only goes out once it is flushed.
-                    Err(_) if start.elapsed() < BYTE_TIMEOUT => {
-                        let _ = self.usb.flush_tx_nb();
-                    }
-                    Err(_) => {
-                        self.ok = false;
-                        return Err(core::fmt::Error);
-                    }
-                }
-            }
-        }
-        Ok(())
+    let mut sector = [0u8; FlashStorage::SECTOR_SIZE as usize];
+    flash
+        .read(base, &mut sector)
+        .map_err(|_| "cannot read ota_1")?;
+    if !(sector.iter().all(|&b| b == 0xFF) || sector.starts_with(SAVE_MAGIC)) {
+        return Err("ota_1 holds something else; not overwriting it");
     }
+
+    let header = 16;
+    let total = header + rec.len() * FRAME_BYTES;
+    let sectors = total.div_ceil(sector.len()) as u32;
+    if sectors * FlashStorage::SECTOR_SIZE > len {
+        return Err("recording larger than ota_1");
+    }
+    info!("saving {} frames ({total} B) to {base:#x}", rec.len());
+    flash
+        .erase(base, base + sectors * FlashStorage::SECTOR_SIZE)
+        .map_err(|_| "erase failed")?;
+
+    // Fill one sector at a time from the PSRAM buffer, then write it.
+    let mut frames = rec.iter();
+    for i in 0..sectors {
+        sector.fill(0xFF);
+        let mut at = 0;
+        if i == 0 {
+            sector[..4].copy_from_slice(SAVE_MAGIC);
+            sector[4..8].copy_from_slice(&(rec.len() as u32).to_le_bytes());
+            sector[8..12].copy_from_slice(&SAMPLE_RATE.to_le_bytes());
+            sector[12..16].copy_from_slice(&(slot as u32).to_le_bytes());
+            at = header;
+        }
+        while at + FRAME_BYTES <= sector.len() {
+            let Some(raw) = frames.next() else { break };
+            sector[at..at + FRAME_BYTES].copy_from_slice(&raw.to_le_bytes());
+            at += FRAME_BYTES;
+        }
+        flash
+            .write_nor(base + i * FlashStorage::SECTOR_SIZE, &sector)
+            .map_err(|_| "write failed")?;
+    }
+    Ok(base)
 }

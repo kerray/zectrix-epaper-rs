@@ -19,6 +19,7 @@ esp-bootloader-esp-idf.workspace = true
 esp-alloc.workspace = true
 esp-backtrace = { workspace = true, features = ["panic-handler", "custom-halt"] }
 esp-println.workspace = true
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
 critical-section.workspace = true
 log.workspace = true
 heapless.workspace = true

@@ -111,6 +111,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "esp-storage",
  "heapless 0.9.3",
  "log",
  "zectrix-board",
