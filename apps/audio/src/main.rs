@@ -140,7 +140,9 @@ impl Playout {
             if let Some(s) = self.current.as_mut().and_then(Iterator::next) {
                 return Some(s);
             }
-            self.current = Some(ToneGen::new(self.tones.pop_front()?));
+            // Finished (or none): clear it, so `tones_pending` turns false.
+            self.current = self.tones.pop_front().map(ToneGen::new);
+            self.current.as_ref()?;
         }
     }
 
@@ -470,7 +472,7 @@ fn main() -> ! {
             mode = Mode::Idle;
             save_slot = Some(slot);
         }
-        // Dump only once the speaker is quiet: printing blocks the loop.
+        // Save only once the speaker is quiet: writing flash blocks the loop.
         if let Some(slot) = save_slot
             && out.drained()
         {
