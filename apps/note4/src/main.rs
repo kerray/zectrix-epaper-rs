@@ -3,7 +3,9 @@
 //! * Reset or OK wakes it into the menu ([`zectrix_screen::menu`]). Up/Down move, OK opens
 //!   a submenu or runs the item, every submenu has a Back row on top, Up held goes back.
 //! * Each change is one partial refresh of whatever changed ([`zectrix_screen::Presenter`];
-//!   ~0.8 s on the NOTE4), with a full refresh after 16 partials.
+//!   ~0.8 s on the NOTE4), with a full refresh after 16 partials. Up/Down act on press.
+//! * Presses made during a refresh are logged ([`input`]) and applied together afterwards,
+//!   then shown with one refresh: three quick Downs cost two refreshes, not three.
 //! * After 60 s without a press the device shows a sleep screen (full refresh) and goes to
 //!   deep sleep; OK wakes it.
 //! * Down held 3 s switches it off (the power latch is released; on USB power it sleeps
@@ -24,6 +26,7 @@
 
 use core::fmt::Write as _;
 
+mod input;
 mod lab;
 
 use embedded_graphics::{
@@ -42,12 +45,13 @@ use esp_hal::{
     },
     time::{Duration, Instant, Rate},
 };
+use input::{ButtonDelay, Sampler, now_ms};
 use log::{error, info, warn};
 use ssd2683::{MonoFrame, Panel, Ssd2683, Timing};
-use static_cell::ConstStaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use zectrix_board::power::{self, Battery, PowerLatch};
 use zectrix_screen::{
-    Button, Buttons, Event, Presenter, RefreshPolicy, Session, Shown, Update,
+    ButtonConfig, Event, Presenter, RefreshPolicy, Session, Shown, Update,
     menu::{Item, Menu, Nav, Outcome},
     view::{self, Label, Theme},
 };
@@ -58,6 +62,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static FRAME: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new());
 /// What is on the panel now, for partial refreshes (another 15 000 bytes).
 static SHADOW: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new());
+/// The buttons, shared by the main loop and the panel driver's delay.
+static SAMPLER: StaticCell<Sampler> = StaticCell::new();
 
 /// After a panic: device off on battery; on USB retry after this long.
 const PANIC_RETRY: Duration = Duration::from_secs(30 * 60);
@@ -289,10 +295,6 @@ fn show(
     }
 }
 
-fn now_ms() -> u64 {
-    Instant::now().duration_since_epoch().as_millis()
-}
-
 #[main]
 fn main() -> ! {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -311,9 +313,11 @@ fn main() -> ! {
     let delay = Delay::new();
     let mut led = Output::new(p.GPIO3, Level::Low, OutputConfig::default()); // on
     let pull_up = InputConfig::default().with_pull(Pull::Up);
-    let mut ok = Input::new(p.GPIO0, pull_up);
-    let down = Input::new(p.GPIO18, pull_up);
-    let up = Input::new(p.GPIO39, pull_up);
+    let sampler: &'static Sampler = SAMPLER.init(Sampler::new(
+        Input::new(p.GPIO39, pull_up),
+        Input::new(p.GPIO18, pull_up),
+        Input::new(p.GPIO0, pull_up),
+    ));
     let charging_pin = Input::new(p.GPIO2, pull_up);
     let full_pin = Input::new(p.GPIO1, InputConfig::default());
     let mut battery = Battery::new(p.ADC1, p.GPIO4);
@@ -328,6 +332,12 @@ fn main() -> ! {
         "battery {:?} mV, charging {}, full {}",
         status.battery_mv, status.charging, status.full
     );
+
+    // Up/Down move on press, not release: a hold (Back, Off) then follows the move.
+    let button_cfg = ButtonConfig {
+        move_on_press: true,
+        ..ButtonConfig::default()
+    };
 
     let spi = Spi::new(
         p.SPI3,
@@ -345,7 +355,8 @@ fn main() -> ! {
         Output::new(p.GPIO9, Level::High, OutputConfig::default()),  // RST
         Input::new(p.GPIO8, pull_up),                                // BUSY, low = busy
         Output::new(p.GPIO6, Level::Low, OutputConfig::default()),   // panel rail
-        delay,
+        // Samples the buttons while the driver waits for the panel.
+        ButtonDelay::new(sampler),
         Panel::Mono,
     )
     // 1 ms BUSY polling so the lab's timings are not rounded to 10 ms.
@@ -366,14 +377,9 @@ fn main() -> ! {
         levels: [false; 3],
     };
 
-    let mut buttons = Buttons::default();
     // Buttons held at start (OK that woke us, Down that switched us on) count only after
     // they were released.
-    for (b, pin) in [(Button::Ok, &ok), (Button::Down, &down), (Button::Up, &up)] {
-        if pin.is_low() {
-            buttons.ignore_until_release(b, now_ms());
-        }
-    }
+    let mut buttons = sampler.fresh_buttons(button_cfg);
 
     if let Err(e) = epd.power_on() {
         error!("panel power: {e:?}");
@@ -382,11 +388,12 @@ fn main() -> ! {
 
     let mut session = Session::with_default(now_ms());
     let off = loop {
+        sampler.drain(&mut buttons);
+        ui.levels = sampler.levels();
         let t = now_ms();
-        ui.levels = [up.is_low(), down.is_low(), ok.is_low()];
-        buttons.input(Button::Up, ui.levels[0], t);
-        buttons.input(Button::Down, ui.levels[1], t);
-        buttons.input(Button::Ok, ui.levels[2], t);
+        // Apply every event first and refresh once: presses made during a refresh are
+        // logged by the sampler and arrive here together.
+        let mut redraw: Option<Update> = None;
         let mut leave = None;
         while let Some(event) = buttons.poll(t) {
             session.touch(t);
@@ -394,32 +401,45 @@ fn main() -> ! {
             match ui.handle(event) {
                 Effect::None => {}
                 Effect::Redraw(update) => {
-                    if ui.view == Some(View::Info) {
-                        status = read_status(&mut battery);
-                    }
-                    show(&mut ui, &mut epd, frame, shadow, &status, update);
+                    redraw = Some(match (redraw, update) {
+                        (Some(Update::NewScreen), _) | (_, Update::NewScreen) => Update::NewScreen,
+                        _ => Update::Change,
+                    });
                 }
                 Effect::FullRefresh => {
                     ui.draw(frame, &status);
                     if let Err(e) = ui.presenter.full(&mut epd, frame, shadow) {
                         error!("display: {e:?}");
                     }
+                    redraw = None;
                 }
                 Effect::Lab => {
-                    let mut lab_buttons = lab::Buttons::new(&up, &down, &ok);
+                    let ok = sampler.ok();
+                    let mut lab_buttons = lab::Buttons::new(sampler.up(), sampler.down(), &ok);
                     lab::run(&mut epd, frame, shadow, &mut lab_buttons, &delay);
-                    // The lab ends with a full refresh of its own screen.
+                    // The lab ends with a full refresh of its own screen, and read the
+                    // pins itself.
                     ui.presenter.policy_mut().shadow_restored();
-                    buttons.ignore_until_release(Button::Ok, now_ms());
+                    buttons = sampler.fresh_buttons(button_cfg);
                     session.touch(now_ms());
-                    show(&mut ui, &mut epd, frame, shadow, &status, Update::NewScreen);
+                    redraw = Some(Update::NewScreen);
+                    break;
                 }
                 Effect::Sleep => leave = Some(false),
                 Effect::Off => leave = Some(true),
             }
+            if leave.is_some() {
+                break;
+            }
         }
         if let Some(off) = leave {
             break off;
+        }
+        if let Some(update) = redraw {
+            if ui.view == Some(View::Info) {
+                status = read_status(&mut battery);
+            }
+            show(&mut ui, &mut epd, frame, shadow, &status, update);
         }
         if session.should_sleep(t) {
             break false;
@@ -441,7 +461,7 @@ fn main() -> ! {
     if off {
         info!("switching off");
         // Wait for Down to be released, or it would switch the device on again.
-        while down.is_low() {
+        while sampler.down().is_low() {
             delay.delay_millis(BUTTON_POLL_MS);
         }
         latch.release();
@@ -450,5 +470,5 @@ fn main() -> ! {
         warn!("still powered (USB?), sleeping instead");
     }
     info!("sleeping; OK wakes");
-    power::deep_sleep(p.LPWR, &mut ok, None)
+    power::deep_sleep(p.LPWR, &mut sampler.ok_mut(), None)
 }

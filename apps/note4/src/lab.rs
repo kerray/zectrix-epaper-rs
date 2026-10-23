@@ -37,8 +37,15 @@ use esp_hal::{
 use log::{error, info};
 use ssd2683::{MonoFrame, Rect, Ssd2683};
 
-pub type Epd<'d> =
-    Ssd2683<Spi<'d, Blocking>, Output<'d>, Output<'d>, Output<'d>, Input<'d>, Output<'d>, Delay>;
+pub type Epd<'d> = Ssd2683<
+    Spi<'d, Blocking>,
+    Output<'d>,
+    Output<'d>,
+    Output<'d>,
+    Input<'d>,
+    Output<'d>,
+    crate::input::ButtonDelay,
+>;
 
 const ROWS: usize = 6;
 const ROW_H: u16 = 40;
