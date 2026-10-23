@@ -3,10 +3,11 @@
 
 Usage: pcm-from-log.py LOG [OUT.wav]
 
-The app prints `PCM-START <frames> <rate> <slot>`, lines `PCM <first frame> <hex>` with
-32 little-endian i16 samples each, and `PCM-END <sum>` (wrapping u16 sum of all samples)
-after each playback. The last complete dump in LOG is used. Lost lines are filled with
-silence and reported.
+The app prints `PCM-START <frames> <rate> <mic slot>`, lines `PCM <first frame> <hex>`
+with 32 raw stereo frames each (slot 0 then slot 1, little-endian i16), and
+`PCM-END <sum>` (wrapping u16 sum of all samples) after each playback. The last complete
+dump in LOG is used and written as a stereo WAV. Lost lines are filled with silence and
+reported. Both slots are analysed; the mic slot is the one played back.
 
 The report helps tell recording faults from playback faults:
 - dropouts: 10 ms blocks that are digital silence or a repeated value in the middle of
@@ -55,16 +56,17 @@ def parse(path):
 
 
 def samples_of(dump):
+    """Interleaved stereo samples and the number of lost lines."""
     n = dump["frames"]
-    out = [0] * n
+    out = [0] * (2 * n)
     missing = 0
     for first in range(0, n, 32):
         data = dump["lines"].get(first)
         count = min(32, n - first)
-        if data is None or len(data) != 2 * count:
+        if data is None or len(data) != 4 * count:
             missing += 1
             continue
-        out[first : first + count] = struct.unpack(f"<{count}h", data)
+        out[2 * first : 2 * (first + count)] = struct.unpack(f"<{2 * count}h", data)
     return out, missing
 
 
@@ -83,19 +85,34 @@ def main():
         sys.exit(__doc__)
     dump = parse(sys.argv[1])
     out_path = sys.argv[2] if len(sys.argv) == 3 else "recording.wav"
-    s, missing = samples_of(dump)
+    both, missing = samples_of(dump)
     rate = dump["rate"]
-    total = sum(s) & 0xFFFF
-    print(f"{len(s)} samples, {len(s) / rate:.2f} s at {rate} Hz, slot {dump['slot']}")
+    total = sum(both) & 0xFFFF
+    print(f"{len(both) // 2} frames, {len(both) / 2 / rate:.2f} s at {rate} Hz, "
+          f"mic slot {dump['slot']}")
     print(f"lines missing: {missing}; sum {'OK' if total == dump['sum'] else 'MISMATCH'}")
 
     with wave.open(out_path, "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(rate)
-        w.writeframes(struct.pack(f"<{len(s)}h", *s))
-    print(f"wrote {out_path}")
+        w.writeframes(struct.pack(f"<{len(both)}h", *both))
+    print(f"wrote {out_path} (stereo: left = slot 0, right = slot 1)")
 
+    for slot in (0, 1):
+        tag = " (mic, played back)" if slot == dump["slot"] else ""
+        print(f"\n== slot {slot}{tag}")
+        report(both[slot::2], rate)
+    a, b = both[0::2], both[1::2]
+    if a and b:
+        ma, mb = sum(a) / len(a), sum(b) / len(b)
+        cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+        va = sum((x - ma) ** 2 for x in a)
+        vb = sum((y - mb) ** 2 for y in b)
+        print(f"\ncorrelation slot 0 / slot 1: {cov / math.sqrt(va * vb + 1e-9):.2f}")
+
+
+def report(s, rate):
     if not s:
         return
     peak = max(abs(x) for x in s)

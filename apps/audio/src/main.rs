@@ -43,6 +43,7 @@ use esp_hal::{
         Channels, DataFormat, I2s, I2sRx, I2sRxDmaTransfer, I2sTx, I2sTxDmaTransfer, TdmConfig,
     },
     main,
+    usb::usb_serial_jtag::UsbSerialJtag,
     psram::{Psram, PsramConfig, PsramMode},
     time::{Duration, Instant, Rate},
 };
@@ -271,6 +272,8 @@ fn main() -> ! {
     info!("PSRAM {} KiB", psram_size / 1024);
 
     let delay = Delay::new();
+    // For the PCM dump; the logger keeps writing to the same FIFO.
+    let mut usb = UsbSerialJtag::new(p.USB_DEVICE);
     let mut led = Output::new(p.GPIO3, Level::High, OutputConfig::default()); // off
     let pull_up = InputConfig::default().with_pull(Pull::Up);
     let mut ok = Button::new(Input::new(p.GPIO0, pull_up));
@@ -471,7 +474,7 @@ fn main() -> ! {
             && out.drained()
         {
             dump_slot = None;
-            dump_recording(&rec, slot);
+            dump_recording(&mut usb, &rec, slot);
             // The rings ran unattended while printing.
             streams.restart();
             last_rx = Instant::now();
@@ -614,26 +617,68 @@ fn stop_recording(
     }
 }
 
-/// Print the recorded slot over serial, for analysis on a PC (`tools/pcm-from-log.py`):
-/// `PCM-START <frames> <rate> <slot>`, then `PCM <first frame> <hex i16 LE …>` lines of 32
-/// samples, then `PCM-END <sum>` with the wrapping sum of all samples as u16, so lost or
-/// broken lines show up.
-fn dump_recording(rec: &[u32], slot: usize) {
+/// Print the recording over USB serial, for analysis on a PC (`tools/pcm-from-log.py`):
+/// `PCM-START <frames> <rate> <mic slot>`, then `PCM <first frame> <hex>` lines of 32 raw
+/// stereo frames (slot 0 then slot 1, each i16 LE), then `PCM-END <sum>` with the wrapping
+/// u16 sum of all samples of both slots, so lost or broken lines show up.
+///
+/// This bypasses `esp_println`, which drops all output after a FIFO wait of well under a
+/// millisecond; USB/IP to WSL is slower than that. Here each byte may wait up to a second,
+/// and the dump stops if no host drains the FIFO.
+fn dump_recording(usb: &mut UsbSerialJtag<'_, Blocking>, rec: &[u32], slot: usize) {
     use core::fmt::Write as _;
-    esp_println::println!("PCM-START {} {} {}", rec.len(), SAMPLE_RATE, slot);
+    info!("dumping {} frames over USB serial", rec.len());
+    let mut out = UsbOut { usb, ok: true };
+    let _ = writeln!(out, "PCM-START {} {} {}", rec.len(), SAMPLE_RATE, slot);
     let mut sum: u16 = 0;
     for (i, chunk) in rec.chunks(32).enumerate() {
-        let mut line: heapless::String<160> = heapless::String::new();
-        let _ = write!(line, "PCM {}", i * 32);
-        let _ = line.push(' ');
+        let _ = write!(out, "PCM {} ", i * 32);
         for raw in chunk {
             let (a, b) = slots(raw.to_le_bytes());
-            let s = if slot == 0 { a } else { b };
-            sum = sum.wrapping_add(s as u16);
-            let [lo, hi] = s.to_le_bytes();
-            let _ = write!(line, "{lo:02x}{hi:02x}");
+            sum = sum.wrapping_add(a as u16).wrapping_add(b as u16);
+            let [a0, a1] = a.to_le_bytes();
+            let [b0, b1] = b.to_le_bytes();
+            let _ = write!(out, "{a0:02x}{a1:02x}{b0:02x}{b1:02x}");
         }
-        esp_println::println!("{}", line);
+        let _ = writeln!(out);
+        if !out.ok {
+            warn!("dump aborted: no host reading the USB serial port");
+            return;
+        }
     }
-    esp_println::println!("PCM-END {}", sum);
+    let _ = writeln!(out, "PCM-END {sum}");
+    let start = Instant::now();
+    while out.usb.flush_tx_nb().is_err() && start.elapsed() < Duration::from_secs(1) {}
+}
+
+/// Blocking USB serial output with a per-byte timeout; `ok` turns false on the first one.
+struct UsbOut<'a, 'd> {
+    usb: &'a mut UsbSerialJtag<'d, Blocking>,
+    ok: bool,
+}
+
+impl core::fmt::Write for UsbOut<'_, '_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        const BYTE_TIMEOUT: Duration = Duration::from_secs(1);
+        for &b in s.as_bytes() {
+            if !self.ok {
+                return Err(core::fmt::Error);
+            }
+            let start = Instant::now();
+            loop {
+                match self.usb.write_byte_nb(b) {
+                    Ok(()) => break,
+                    // The FIFO is full; it only goes out once it is flushed.
+                    Err(_) if start.elapsed() < BYTE_TIMEOUT => {
+                        let _ = self.usb.flush_tx_nb();
+                    }
+                    Err(_) => {
+                        self.ok = false;
+                        return Err(core::fmt::Error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
