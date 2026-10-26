@@ -1,11 +1,61 @@
 // This build script is the esp-generate 1.4.0 project template's build.rs,
 // Copyright (c) 2024 esp-rs, MIT OR Apache-2.0 (see THIRD_PARTY_NOTICES.md).
 
+use std::path::PathBuf;
+
+use zectrix_net::build_config::{self, Source, Url, Wifi};
+
 fn main() {
+    config();
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// Longest screen id the firmware appends to `SCREEN_URL` (keep in sync with
+/// `src/remote.rs`, `SCREEN_ID_MAX`), plus ETag and key headers, must fit the request buffer.
+const SCREEN_ID_MAX: usize = 24;
+
+/// Optional compile-time configuration for server screens. Where values come from (the
+/// environment, `$ZECTRIX_ENV` or the nearest `.env`) is described in
+/// `zectrix_net::build_config`.
+///
+/// - `SCREEN_URL`: `https://host[:port]/path?query` of the screen endpoint
+///   (docs/INTERACTIVE.md, "Protocol"). The firmware appends `screen=<id>` with `?` or `&`.
+///   Without it the firmware builds without networking and server screens say so.
+/// - `WIFI_SSID`, `WIFI_PASSWORD`: required when `SCREEN_URL` is set.
+/// - `SCREEN_KEY`: optional bearer token.
+/// - `SCREEN_CA_PEM`: optional path to a PEM trust anchor (default ISRG Root X1).
+///
+/// Sets `cfg(screen_server)` when configured.
+fn config() {
+    println!("cargo::rustc-check-cfg=cfg(screen_server)");
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let src = Source::locate(&manifest);
+    let Some(url) = src.get("SCREEN_URL") else {
+        build_config::warn("SCREEN_URL is not set: building without server screens (see build.rs)");
+        return;
+    };
+    Wifi::required(&src).emit();
+    let url = Url::parse("SCREEN_URL", &url, src.origin());
+    let key = src.get("SCREEN_KEY").unwrap_or_default();
+    let sep = if url.path.contains('?') { "&" } else { "?" };
+
+    let auth = format!("Bearer {key}");
+    let id = format!("{sep}screen={}", "x".repeat(SCREEN_ID_MAX));
+    let etag = "x".repeat(zectrix_net::http::ETAG_MAX);
+    let mut headers = vec![("If-None-Match", etag.as_str())];
+    if !key.is_empty() {
+        headers.insert(0, ("Authorization", auth.as_str()));
+    }
+    url.check_request_fits(&id, &headers, "SCREEN_URL and SCREEN_KEY");
+
+    url.emit("SCREEN");
+    println!("cargo:rustc-env=SCREEN_SEP={sep}");
+    println!("cargo:rustc-env=SCREEN_KEY={key}");
+    build_config::ca_pem(&src, "SCREEN_CA_PEM", "SCREEN_CA_FILE", "screen_custom_ca");
+    println!("cargo:rustc-cfg=screen_server");
 }
 
 #[cfg(unix)]

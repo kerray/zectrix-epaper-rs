@@ -35,5 +35,4 @@ mbedtls-rs.workspace = true
 tinyrlibc.workspace = true
 
 [build-dependencies]
-zectrix-net.workspace = true
-heapless.workspace = true
+zectrix-net = { workspace = true, features = ["build"] }

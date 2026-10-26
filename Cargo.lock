@@ -2231,6 +2231,9 @@ name = "note4"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "embassy-executor",
+ "embassy-net",
+ "embassy-time",
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "esp-alloc",
@@ -2238,11 +2241,16 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "esp-radio",
+ "esp-rtos",
  "heapless 0.9.3",
  "log",
+ "mbedtls-rs",
  "ssd2683",
  "static_cell",
+ "tinyrlibc",
  "zectrix-board",
+ "zectrix-net",
  "zectrix-screen",
 ]
 

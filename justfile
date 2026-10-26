@@ -35,7 +35,7 @@ setup:
 # Host tests of the driver and board logic, host-crate clippy, format check.
 test:
     cd {{root}} && cargo test --locked
-    cd {{root}} && cargo clippy --locked --workspace --exclude note4 --exclude note4c --exclude audio --all-targets -- -D warnings
+    cd {{root}} && cargo clippy --locked --workspace --exclude note4 --exclude note4c --exclude audio --features zectrix-net/build --all-targets -- -D warnings
     cd {{root}} && cargo fmt --all -- --check
 
 # Build one app (note4 | note4c | audio).

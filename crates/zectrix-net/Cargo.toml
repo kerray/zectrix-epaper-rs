@@ -9,6 +9,8 @@ publish = false
 
 [features]
 default = []
+# build_config: the firmware build scripts' compile-time configuration (host, std).
+build = []
 # Wi-Fi + TLS on the ESP32-S3. Without it only the host-testable HTTP parser builds.
 hal = [
     "dep:esp-hal",

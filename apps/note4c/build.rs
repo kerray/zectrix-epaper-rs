@@ -1,6 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use zectrix_net::{dotenv, http};
+use zectrix_net::build_config::{self, Source, Url, Wifi};
+use zectrix_net::http;
 
 fn main() {
     config();
@@ -16,15 +17,9 @@ const WAKE_MAX: usize = 48;
 const BATTERY_MAX: usize = 10;
 const DISPLAY_MAX: usize = 40;
 
-/// Compile-time configuration, see README "Configuration".
-///
-/// Each value comes from the environment or, failing that, from a dotenv file: `$ZECTRIX_ENV`
-/// if set (a relative path is taken relative to `apps/note4c`), otherwise the nearest `.env`
-/// from `apps/note4c` up to the workspace root or the first directory with a `.git` entry,
-/// whichever comes first. The dotenv syntax is described in `zectrix_net::dotenv`.
-/// A newly created `.env` is picked up after `cargo clean -p note4c` (or `touch build.rs`).
-/// Values are not printed at the default verbosity (`cargo -vv` shows the `rustc-env`
-/// lines, and `target/` contains them).
+/// Compile-time configuration, see README "Configuration". Where values come from (the
+/// environment, `$ZECTRIX_ENV` or the nearest `.env`) is described in
+/// `zectrix_net::build_config`.
 ///
 /// - `WIFI_SSID` (1–32 bytes), `WIFI_PASSWORD` (8–64 bytes, WPA2): required.
 /// - `FRAME_URL`: required, `https://host[:port]/path?query`, host made of `A-Z a-z 0-9 . -`.
@@ -33,85 +28,21 @@ const DISPLAY_MAX: usize = 40;
 /// - `FRAME_CA_PEM`: optional path to a PEM trust anchor; relative paths are resolved against
 ///   the dotenv file's directory. Default: ISRG Root X1 (Let's Encrypt).
 ///
-/// No value may contain control characters (CR, LF, tab, …). The URL and key together must
-/// leave room in the request buffer (`zectrix_net::http::REQUEST_MAX`) for the headers the
-/// firmware adds.
+/// The URL and key together must leave room in the request buffer
+/// (`zectrix_net::http::REQUEST_MAX`) for the headers the firmware adds.
 fn config() {
-    println!("cargo:rerun-if-env-changed=ZECTRIX_ENV");
-    println!("cargo::rustc-check-cfg=cfg(frame_custom_ca)");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dotenv_file = dotenv_path(&manifest);
-    let base = dotenv_file
-        .as_deref()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| manifest.clone());
-    let file = match &dotenv_file {
-        Some(path) => {
-            println!("cargo:rerun-if-changed={}", path.display());
-            std::fs::read_to_string(path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-        }
-        None => String::new(),
-    };
-    let where_ = match &dotenv_file {
-        Some(path) => format!("the environment or {}", path.display()),
-        None => "the environment or a .env file (none found; see ZECTRIX_ENV)".to_string(),
-    };
-    let get = |key: &str| -> Option<String> {
-        println!("cargo:rerun-if-env-changed={key}");
-        let value = std::env::var(key)
-            .ok()
-            .or_else(|| dotenv::get(&file, key).map(str::to_string))
-            .filter(|v| !v.is_empty())?;
-        // Also stops header injection and truncated `cargo:` lines.
-        assert!(
-            !value.chars().any(char::is_control),
-            "{key} contains a control character (CR, LF, tab, …); check {where_}."
-        );
-        Some(value)
-    };
-    let required = |key: &str| -> String {
-        get(key).unwrap_or_else(|| panic!("{key} is not set. Put it into {where_}."))
-    };
+    let src = Source::locate(&manifest);
 
-    let ssid = required("WIFI_SSID");
-    assert!(
-        ssid.len() <= 32,
-        "WIFI_SSID is {} bytes; Wi-Fi allows at most 32.",
-        ssid.len()
-    );
-    // The firmware joins WPA2 / WPA2-WPA3 networks only (zectrix_net::wifi), so no open ones.
-    let password = required("WIFI_PASSWORD");
-    assert!(
-        (8..=64).contains(&password.len()),
-        "WIFI_PASSWORD is {} bytes; WPA2 needs 8-63 characters (or 64 hex digits).",
-        password.len()
-    );
-    println!("cargo:rustc-env=WIFI_SSID={ssid}");
-    println!("cargo:rustc-env=WIFI_PASSWORD={password}");
+    Wifi::required(&src).emit();
 
-    let url = required("FRAME_URL");
-    assert!(
-        url.is_ascii(),
-        "FRAME_URL must be ASCII; percent-encode other characters (from {where_})."
-    );
-    let Some(parts) = http::parse_https_url(&url) else {
-        panic!("FRAME_URL must look like https://host[:port]/path?query (from {where_}).");
-    };
-    assert!(
-        parts
-            .host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'),
-        "FRAME_URL host may contain only A-Z, a-z, 0-9, '.' and '-' (a name or an IPv4 address)."
-    );
-
-    let key = get("FRAME_KEY")
+    let url = Url::parse("FRAME_URL", &src.required("FRAME_URL"), src.origin());
+    let key = src
+        .get("FRAME_KEY")
         .or_else(|| {
-            let old = get("NOTE4_FRAME_KEY");
+            let old = src.get("NOTE4_FRAME_KEY");
             if old.is_some() {
-                println!("cargo:warning=NOTE4_FRAME_KEY is deprecated, rename it to FRAME_KEY");
+                build_config::warn("NOTE4_FRAME_KEY is deprecated, rename it to FRAME_KEY");
             }
             old
         })
@@ -135,72 +66,11 @@ fn config() {
     if !key.is_empty() {
         headers.insert(0, ("Authorization", auth.as_str()));
     }
-    let mut request: heapless::String<16384> = heapless::String::new();
-    let fits = http::write_get(&mut request, parts.host, parts.port, parts.path, &headers).is_ok()
-        && request.len() <= http::REQUEST_MAX;
-    assert!(
-        fits,
-        "FRAME_URL and FRAME_KEY are too long: the longest request would be {} bytes, the \
-         firmware's buffer is {} (zectrix_net::http::REQUEST_MAX). Shorten the path, query or key.",
-        request.len(),
-        http::REQUEST_MAX
-    );
+    url.check_request_fits("", &headers, "FRAME_URL and FRAME_KEY");
 
-    println!("cargo:rustc-env=FRAME_HOST={}", parts.host);
-    println!("cargo:rustc-env=FRAME_PORT={}", parts.port);
-    println!("cargo:rustc-env=FRAME_PATH={}", parts.path);
+    url.emit("FRAME");
     println!("cargo:rustc-env=FRAME_KEY={key}");
-
-    if let Some(ca) = get("FRAME_CA_PEM") {
-        // include_str! resolves relative paths against src/, so pass an absolute one.
-        let path = std::path::absolute(base.join(ca)).expect("FRAME_CA_PEM path");
-        let pem = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("FRAME_CA_PEM {}: {e}", path.display()));
-        assert!(
-            pem.contains("-----BEGIN CERTIFICATE-----") && !pem.contains('\0'),
-            "FRAME_CA_PEM {} is not a PEM certificate",
-            path.display()
-        );
-        let shown = path.display().to_string();
-        assert!(
-            !shown.chars().any(char::is_control),
-            "FRAME_CA_PEM path contains a control character"
-        );
-        println!("cargo:rerun-if-changed={shown}");
-        println!("cargo:rustc-env=FRAME_CA_FILE={shown}");
-        println!("cargo:rustc-cfg=frame_custom_ca");
-    }
-}
-
-/// `$ZECTRIX_ENV` (made absolute against `apps/note4c`), else the nearest `.env` from this
-/// crate's directory up to the workspace root (`apps/note4c/../..`, which holds the
-/// workspace `Cargo.toml`) or the first directory with a `.git` entry, whichever comes
-/// first. So a `.env` above the checkout (e.g. `~/.env` next to an unpacked ZIP) is never used.
-fn dotenv_path(manifest: &Path) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("ZECTRIX_ENV") {
-        let path = std::path::absolute(PathBuf::from(path)).expect("ZECTRIX_ENV path");
-        assert!(
-            path.is_file(),
-            "ZECTRIX_ENV={} is not a file",
-            path.display()
-        );
-        return Some(path);
-    }
-    let workspace = manifest.join("../..");
-    let workspace = workspace.canonicalize().unwrap_or(workspace);
-    let manifest = manifest
-        .canonicalize()
-        .unwrap_or_else(|_| manifest.to_path_buf());
-    for dir in manifest.ancestors() {
-        let candidate = dir.join(".env");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if dir == workspace || dir.join(".git").exists() {
-            break;
-        }
-    }
-    None
+    build_config::ca_pem(&src, "FRAME_CA_PEM", "FRAME_CA_FILE", "frame_custom_ca");
 }
 
 // The linker helpers below (check_xtensa_linker_available, xtensa_linker,

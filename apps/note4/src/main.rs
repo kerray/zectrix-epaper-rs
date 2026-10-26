@@ -28,30 +28,37 @@ use core::fmt::Write as _;
 
 mod input;
 mod lab;
+#[cfg(screen_server)]
+mod remote;
 
+use embassy_executor::Spawner;
+use embassy_time::Timer;
 use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
 };
 use esp_backtrace as _;
 use esp_hal::{
+    clock::CpuClock,
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    main,
     rtc_cntl::WakeupSource,
     spi::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
     },
     time::{Duration, Instant, Rate},
+    timer::timg::TimerGroup,
 };
 use input::{ButtonDelay, Sampler, now_ms};
 use log::{error, info, warn};
 use ssd2683::{MonoFrame, Panel, Ssd2683, Timing};
 use static_cell::{ConstStaticCell, StaticCell};
+#[cfg(screen_server)]
+use tinyrlibc as _;
 use zectrix_board::power::{self, Battery, PowerLatch};
 use zectrix_screen::{
-    ButtonConfig, Event, Presenter, RefreshPolicy, Session, Shown, Update,
+    ButtonConfig, Event, Layout, Merge, Presenter, RefreshPolicy, Screen, Session, Shown, Update,
     menu::{Item, Menu, Nav, Outcome},
     view::{self, Label, Theme},
 };
@@ -64,6 +71,9 @@ static FRAME: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new()
 static SHADOW: ConstStaticCell<MonoFrame> = ConstStaticCell::new(MonoFrame::new());
 /// The buttons, shared by the main loop and the panel driver's delay.
 static SAMPLER: StaticCell<Sampler> = StaticCell::new();
+/// The last screen bundle from the server (a 10-row list is about 35 KB).
+static BUNDLE: ConstStaticCell<[u8; BUNDLE_MAX]> = ConstStaticCell::new([0; BUNDLE_MAX]);
+const BUNDLE_MAX: usize = 40 * 1024;
 
 /// After a panic: device off on battery; on USB retry after this long.
 const PANIC_RETRY: Duration = Duration::from_secs(30 * 60);
@@ -81,9 +91,18 @@ const BUTTON_POLL_MS: u32 = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Open(View),
+    /// Fetch a screen from the server.
+    Fetch(Source),
     Lab,
     FullRefresh,
     Sleep,
+}
+
+/// A server screen: its id in `screen=<id>` and a title for the loading and error screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Source {
+    id: &'static str,
+    title: &'static str,
 }
 
 /// A screen other than the menu.
@@ -91,10 +110,17 @@ enum Action {
 enum View {
     Info,
     ButtonTest,
-    /// Not built yet; the label names it.
-    Soon(&'static str),
+    /// The bundle in [`Ui::bundle`].
+    Server(Source),
+    Loading(Source),
+    /// Loading failed; [`Ui::error`] says why.
+    Failed(Source),
     Asleep,
     Off,
+}
+
+const fn fetch(id: &'static str, title: &'static str) -> Action {
+    Action::Fetch(Source { id, title })
 }
 
 static SYSTEM: Menu<Action> = Menu::new(
@@ -111,10 +137,11 @@ static SYSTEM: Menu<Action> = Menu::new(
 static ROOT: Menu<Action> = Menu::new(
     "ZECTRIX NOTE4",
     &[
-        Item::action("Lights", Action::Open(View::Soon("Lights"))),
-        Item::action("Calendar", Action::Open(View::Soon("Calendar"))),
-        Item::action("Weather", Action::Open(View::Soon("Weather"))),
-        Item::action("Last answer", Action::Open(View::Soon("Last answer"))),
+        Item::action("Lights", fetch("lights", "Lights")),
+        Item::action("Calendar", fetch("calendar", "Calendar")),
+        Item::action("Weather", fetch("weather", "Weather")),
+        Item::action("Last answer", fetch("answer", "Last answer")),
+        Item::action("Server demo", fetch("demo", "Server demo")),
         Item::submenu("System", &SYSTEM),
     ],
 );
@@ -136,16 +163,31 @@ struct Ui {
     /// Button test: the last event and the raw levels (up, down, ok; true = pressed).
     last_event: Option<Event>,
     levels: [bool; 3],
+    /// The server screen: bundle bytes, length and selected row.
+    bundle: &'static mut [u8; BUNDLE_MAX],
+    bundle_len: usize,
+    bundle_sel: Option<usize>,
+    /// Why the last server screen failed.
+    error: Label,
 }
 
 impl Ui {
-    fn draw(&self, frame: &mut MonoFrame, status: &Status) {
+    fn draw(&mut self, frame: &mut MonoFrame, status: &Status) {
+        if let Some(View::Server(_)) = self.view
+            && let Ok(mut screen) = Screen::new(&mut self.bundle[..self.bundle_len])
+        {
+            if let Some(sel) = self.bundle_sel {
+                screen.select(sel, frame, Merge::Always);
+            }
+            screen.compose(frame);
+            return;
+        }
         let t = &self.theme;
         let Some(view) = self.view else {
             let partials = self.presenter.policy().partials();
             let _ = view::draw_menu(frame, t, &self.nav, |a, out| match a {
                 Action::FullRefresh => write!(out, "{partials}/{MAX_PARTIALS}"),
-                Action::Open(View::Soon(_)) => out.write_str("soon"),
+                Action::Fetch(_) if !cfg!(screen_server) => out.write_str("n/a"),
                 _ => Ok(()),
             });
             return;
@@ -161,6 +203,9 @@ impl Ui {
                             "Battery {mv} mV, ~{}%",
                             zectrix_board::battery::percent(mv)
                         );
+                    }
+                    None if cfg!(screen_server) => {
+                        let _ = lines[1].push_str("Battery: read after Wi-Fi");
                     }
                     None => {
                         let _ = lines[1].push_str("Battery: no reading");
@@ -198,11 +243,17 @@ impl Ui {
                 let _ = lines[4].push_str("Hold OK: talk, Down 3 s: off.");
                 "Button test"
             }
-            View::Soon(name) => {
-                let _ = lines[0].push_str(name);
-                let _ = lines[1].push_str("comes from the server;");
-                let _ = lines[2].push_str("not built yet.");
-                "Coming soon"
+            View::Loading(src) => {
+                let _ = lines[0].push_str("Loading...");
+                let _ = lines[1].push_str("Wi-Fi and server,");
+                let _ = lines[2].push_str("a few seconds the first time.");
+                src.title
+            }
+            View::Failed(src) | View::Server(src) => {
+                let _ = lines[0].push_str("Could not load:");
+                let _ = lines[1].push_str(&self.error);
+                let _ = lines[3].push_str("OK: back");
+                src.title
             }
             View::Asleep => {
                 let _ = lines[0].push_str("Asleep.");
@@ -223,7 +274,7 @@ impl Ui {
                 "ZECTRIX NOTE4"
             }
         };
-        let back = matches!(view, View::Info | View::ButtonTest | View::Soon(_));
+        let back = matches!(view, View::Info | View::ButtonTest | View::Failed(_));
         let _ = view::draw_title(frame, t, title, back.then_some("OK: back"));
         let _ = view::draw_lines(frame, t, lines.iter().map(|l| l.as_str()));
     }
@@ -233,6 +284,7 @@ impl Ui {
 enum Effect {
     None,
     Redraw(Update),
+    Fetch(Source),
     Lab,
     FullRefresh,
     Sleep,
@@ -243,6 +295,24 @@ impl Ui {
     fn handle(&mut self, event: Event) -> Effect {
         if event == Event::Off {
             return Effect::Off;
+        }
+        if let Some(View::Server(src)) = self.view {
+            return match event {
+                Event::Up | Event::Down => {
+                    self.move_server(event == Event::Down);
+                    Effect::Redraw(Update::Change)
+                }
+                // OK reloads; actions on rows come with the event endpoint.
+                Event::Select => Effect::Fetch(src),
+                Event::Back => {
+                    self.view = None;
+                    Effect::Redraw(Update::NewScreen)
+                }
+                _ => Effect::None,
+            };
+        }
+        if let Some(View::Loading(_)) = self.view {
+            return Effect::None;
         }
         if let Some(view) = self.view {
             if view == View::ButtonTest {
@@ -266,6 +336,7 @@ impl Ui {
                 self.view = Some(view);
                 Effect::Redraw(Update::NewScreen)
             }
+            Outcome::Activate(Action::Fetch(src)) => Effect::Fetch(src),
             Outcome::Activate(Action::Lab) => Effect::Lab,
             Outcome::Activate(Action::FullRefresh) => Effect::FullRefresh,
             Outcome::Activate(Action::Sleep) => Effect::Sleep,
@@ -273,6 +344,54 @@ impl Ui {
             o if o.redraw() => Effect::Redraw(Update::Change),
             // Talk (OK held) comes with voice; Back on the root does nothing.
             _ => Effect::None,
+        }
+    }
+}
+
+impl Ui {
+    /// Move the server screen's selection one selectable row, wrapping around.
+    fn move_server(&mut self, down: bool) {
+        let Ok(layout) = Layout::parse(&self.bundle[..self.bundle_len]) else {
+            return;
+        };
+        let rows = layout.selectable();
+        if rows.is_empty() {
+            return;
+        }
+        let cur = self.bundle_sel.unwrap_or(rows.start);
+        self.bundle_sel = Some(if down {
+            if cur + 1 >= rows.end {
+                rows.start
+            } else {
+                cur + 1
+            }
+        } else if cur <= rows.start {
+            rows.end - 1
+        } else {
+            cur - 1
+        });
+    }
+
+    /// The result of a fetch: show the bundle, or why it failed.
+    fn loaded(&mut self, src: Source, result: Result<usize, Label>) {
+        match result.and_then(|len| match Layout::parse(&self.bundle[..len]) {
+            Ok(layout) => Ok((len, layout)),
+            Err(e) => {
+                let mut why = Label::new();
+                let _ = write!(why, "bad screen: {e:?}");
+                Err(why)
+            }
+        }) {
+            Ok((len, layout)) => {
+                self.bundle_len = len;
+                self.bundle_sel =
+                    (!layout.selectable().is_empty()).then(|| layout.initial_selected());
+                self.view = Some(View::Server(src));
+            }
+            Err(why) => {
+                self.error = why;
+                self.view = Some(View::Failed(src));
+            }
         }
     }
 }
@@ -295,13 +414,30 @@ fn show(
     }
 }
 
-#[main]
-fn main() -> ! {
-    let p = esp_hal::init(esp_hal::Config::default());
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
+    let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     // First: keep ourselves powered on battery.
     let latch = PowerLatch::engage(p.GPIO17);
 
     esp_println::logger::init_logger_from_env();
+    // Wi-Fi and mbedtls allocate; the bootloader's RAM is free after boot.
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 96 * 1024);
+    let timg0 = TimerGroup::new(p.TIMG0);
+    esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
+    #[cfg(screen_server)]
+    let mut remote = remote::Remote::new(
+        spawner,
+        remote::Parts {
+            wifi: p.WIFI,
+            sha: p.SHA,
+            rsa: p.RSA,
+            aes: p.AES,
+        },
+    );
+    #[cfg(not(screen_server))]
+    let _ = spawner;
     // The only other wake source is the timer, which this firmware does not set.
     let cause = esp_hal::system::wakeup_cause();
     let woke_by_ok = !cause.is_empty() && !cause.contains(WakeupSource::Timer);
@@ -321,13 +457,15 @@ fn main() -> ! {
     let charging_pin = Input::new(p.GPIO2, pull_up);
     let full_pin = Input::new(p.GPIO1, InputConfig::default());
     let mut battery = Battery::new(p.ADC1, p.GPIO4);
-    let read_status = |battery: &mut Battery| Status {
-        battery_mv: battery.read_mv(),
+    // With a server, the battery ADC is read only once Wi-Fi is up (or before sleep): an
+    // ADC read just before Wi-Fi left the NOTE4C without a DHCP lease (docs/ROADMAP.md).
+    let read_status = |battery: &mut Battery, adc: bool| Status {
+        battery_mv: if adc { battery.read_mv() } else { None },
         charging: charging_pin.is_low(),
         full: full_pin.is_high(),
         woke_by_ok,
     };
-    let mut status = read_status(&mut battery);
+    let mut status = read_status(&mut battery, !cfg!(screen_server));
     info!(
         "battery {:?} mV, charging {}, full {}",
         status.battery_mv, status.charging, status.full
@@ -375,6 +513,10 @@ fn main() -> ! {
         presenter: Presenter::new(RefreshPolicy::new(MAX_PARTIALS).with_partial_screens(true)),
         last_event: None,
         levels: [false; 3],
+        bundle: BUNDLE.take(),
+        bundle_len: 0,
+        bundle_sel: None,
+        error: Label::new(),
     };
 
     // Buttons held at start (OK that woke us, Down that switched us on) count only after
@@ -413,6 +555,26 @@ fn main() -> ! {
                     }
                     redraw = None;
                 }
+                Effect::Fetch(src) => {
+                    ui.view = Some(View::Loading(src));
+                    show(&mut ui, &mut epd, frame, shadow, &status, Update::NewScreen);
+                    #[cfg(screen_server)]
+                    {
+                        let result = remote.fetch(src.id, &mut ui.bundle[..]).await;
+                        ui.loaded(src, result);
+                    }
+                    #[cfg(not(screen_server))]
+                    {
+                        let mut why = Label::new();
+                        let _ = why.push_str("no server configured");
+                        ui.loaded(src, Err(why));
+                    }
+                    // Presses while loading are dropped.
+                    buttons = sampler.fresh_buttons(button_cfg);
+                    session.touch(now_ms());
+                    redraw = Some(Update::NewScreen);
+                    break;
+                }
                 Effect::Lab => {
                     let ok = sampler.ok();
                     let mut lab_buttons = lab::Buttons::new(sampler.up(), sampler.down(), &ok);
@@ -437,17 +599,24 @@ fn main() -> ! {
         }
         if let Some(update) = redraw {
             if ui.view == Some(View::Info) {
-                status = read_status(&mut battery);
+                #[cfg(screen_server)]
+                let adc = remote.connected();
+                #[cfg(not(screen_server))]
+                let adc = true;
+                status = read_status(&mut battery, adc);
             }
             show(&mut ui, &mut epd, frame, shadow, &status, update);
         }
         if session.should_sleep(t) {
             break false;
         }
-        delay.delay_millis(BUTTON_POLL_MS);
+        // Yields to the network tasks.
+        Timer::after_millis(BUTTON_POLL_MS.into()).await;
     };
 
-    // Last screen: a clean full refresh, so the image stays sharp while asleep.
+    // Last screen: a clean full refresh, so the image stays sharp while asleep. No more
+    // networking follows, so the battery can be read.
+    status = read_status(&mut battery, true);
     ui.view = Some(if off { View::Off } else { View::Asleep });
     ui.draw(frame, &status);
     if let Err(e) = ui.presenter.full(&mut epd, frame, shadow) {

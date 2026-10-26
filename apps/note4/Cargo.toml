@@ -28,3 +28,15 @@ ssd2683.workspace = true
 embedded-hal.workspace = true
 zectrix-screen.workspace = true
 zectrix-board = { workspace = true, features = ["hal"] }
+# Networking for server screens (used only when build.rs sets cfg(screen_server)).
+zectrix-net = { workspace = true, features = ["hal"] }
+esp-rtos.workspace = true
+esp-radio.workspace = true
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embassy-net.workspace = true
+mbedtls-rs.workspace = true
+tinyrlibc.workspace = true
+
+[build-dependencies]
+zectrix-net = { workspace = true, features = ["build"] }

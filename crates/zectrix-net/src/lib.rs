@@ -2,13 +2,17 @@
 //! per connection, and the small HTTP/1.1 parser behind it.
 //!
 //! The parser in [`http`] and the build-script helper [`dotenv`] always build and are tested
-//! on the host. The `hal` feature adds the ESP32-S3 parts: `wifi` (esp-radio +
-//! embassy-net), `https` (mbedtls-rs) and `counting`.
+//! on the host. The `build` feature adds `build_config`, the compile-time configuration
+//! shared by the firmware build scripts (host, std). The `hal` feature adds the ESP32-S3
+//! parts: `wifi` (esp-radio + embassy-net), `https` (mbedtls-rs) and `counting`.
 
 #![cfg_attr(not(test), no_std)]
 
 pub mod dotenv;
 pub mod http;
+
+#[cfg(feature = "build")]
+pub mod build_config;
 
 #[cfg(feature = "hal")]
 pub mod counting;
