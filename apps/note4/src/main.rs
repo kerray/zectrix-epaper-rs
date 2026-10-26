@@ -507,9 +507,13 @@ async fn main(spawner: Spawner) -> ! {
     let mut net = if !net_early {
         NetState::Starting
     } else {
-        match embassy_futures::poll_once(net_start.as_mut()) {
-            core::task::Poll::Ready(r) => NetState::from(r),
-            core::task::Poll::Pending => NetState::Starting,
+        // One poll with the executor's own waker (poll_once's no-op waker panics in the
+        // embassy timer queue): yield_now finishes on its second poll.
+        match embassy_futures::select::select(net_start.as_mut(), embassy_futures::yield_now())
+            .await
+        {
+            embassy_futures::select::Either::First(r) => NetState::from(r),
+            embassy_futures::select::Either::Second(()) => NetState::Starting,
         }
     };
     #[cfg(not(screen_server))]
