@@ -163,8 +163,21 @@ impl Remote {
         )
         .await
         .map_err(|e| match e {
-            wifi::WifiError::Associate(_) => reason(format_args!("Wi-Fi: cannot join")),
-            wifi::WifiError::Dhcp(_) => reason(format_args!("Wi-Fi: no DHCP lease")),
+            wifi::WifiError::Associate(sv) => match (sv.best, sv.last_reason) {
+                (Some((ch, rssi, _)), Some(why)) => {
+                    reason(format_args!("Wi-Fi ch{ch} {rssi}dBm: {why:?}"))
+                }
+                (Some((ch, rssi, _)), None) => reason(format_args!(
+                    "Wi-Fi ch{ch} {rssi}dBm: no join x{}",
+                    sv.attempts
+                )),
+                (None, _) => reason(format_args!("Wi-Fi: SSID not seen ({} APs)", sv.total)),
+            },
+            wifi::WifiError::Dhcp(sv) => reason(format_args!(
+                "Wi-Fi: no DHCP ({} dBm, link {})",
+                sv.rssi.unwrap_or(0),
+                sv.link_up
+            )),
             e => reason(format_args!("Wi-Fi: {e:?}")),
         })?;
         info!(

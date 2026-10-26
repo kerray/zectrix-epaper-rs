@@ -396,6 +396,30 @@ impl Ui {
     }
 }
 
+/// The battery ADC, set up on the first read.
+enum BatteryAdc {
+    Idle(
+        esp_hal::peripherals::ADC1<'static>,
+        esp_hal::peripherals::GPIO4<'static>,
+    ),
+    Ready(Battery<'static>),
+    Taken,
+}
+
+impl BatteryAdc {
+    fn read_mv(&mut self) -> Option<u32> {
+        if let BatteryAdc::Idle(..) = self
+            && let BatteryAdc::Idle(adc, pin) = core::mem::replace(self, BatteryAdc::Taken)
+        {
+            *self = BatteryAdc::Ready(Battery::new(adc, pin));
+        }
+        match self {
+            BatteryAdc::Ready(b) => b.read_mv(),
+            _ => None,
+        }
+    }
+}
+
 /// Draw the current screen and show it with as small a refresh as the policy allows.
 fn show(
     ui: &mut Ui,
@@ -456,10 +480,11 @@ async fn main(spawner: Spawner) -> ! {
     ));
     let charging_pin = Input::new(p.GPIO2, pull_up);
     let full_pin = Input::new(p.GPIO1, InputConfig::default());
-    let mut battery = Battery::new(p.ADC1, p.GPIO4);
-    // With a server, the battery ADC is read only once Wi-Fi is up (or before sleep): an
-    // ADC read just before Wi-Fi left the NOTE4C without a DHCP lease (docs/ROADMAP.md).
-    let read_status = |battery: &mut Battery, adc: bool| Status {
+    // With a server, the battery ADC is not even set up until Wi-Fi is up (or before
+    // sleep): an ADC read just before Wi-Fi left the NOTE4C without a DHCP lease
+    // (docs/ROADMAP.md), and with the ADC configured at boot the NOTE4 could not join.
+    let mut battery = BatteryAdc::Idle(p.ADC1, p.GPIO4);
+    let read_status = |battery: &mut BatteryAdc, adc: bool| Status {
         battery_mv: if adc { battery.read_mv() } else { None },
         charging: charging_pin.is_low(),
         full: full_pin.is_high(),
