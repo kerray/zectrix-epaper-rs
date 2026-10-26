@@ -67,6 +67,9 @@ pub struct Net {
     stack: embassy_net::Stack<'static>,
     tls: Tls<'static>,
     _hooks: EspHooksGuard<'static>,
+    /// For the Network screen: the link, and the last fetch's timings.
+    pub link: Label,
+    pub last_fetch: Label,
 }
 
 impl Net {
@@ -102,6 +105,12 @@ impl Net {
             resp.head.status,
             resp.body_len,
             t.elapsed().as_millis()
+        );
+        self.last_fetch.clear();
+        let _ = write!(
+            self.last_fetch,
+            "dns {} tcp {} tls {} all {} ms",
+            resp.dns_ms, resp.connect_ms, resp.tls_ms, resp.total_ms
         );
         match resp.head.status {
             200 => Ok(resp.body_len),
@@ -157,10 +166,21 @@ pub async fn start(spawner: Spawner, parts: Parts) -> Result<Net, Label> {
     let queue = QUEUE.init(accel.start());
     // SAFETY: the queue is 'static, so it outlives every TLS session.
     let hooks = unsafe { queue.hook() };
+    let mut summary = Label::new();
+    let _ = write!(
+        summary,
+        "ch{} {} dBm, join {} ms, ip {} ms",
+        link.channel,
+        link.rssi.unwrap_or(0),
+        link.associate_ms,
+        link.dhcp_ms
+    );
     Ok(Net {
         stack: link.stack,
         tls,
         _hooks: hooks,
+        link: summary,
+        last_fetch: Label::new(),
     })
 }
 

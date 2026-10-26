@@ -101,6 +101,7 @@ struct Source {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Info,
+    Network,
     ButtonTest,
     /// The bundle in [`Ui::bundle`].
     Server(Source),
@@ -121,6 +122,7 @@ static SYSTEM: Menu<Action> = Menu::new(
     "System",
     &[
         Item::action("Device info", Action::Open(View::Info)),
+        Item::action("Network", Action::Open(View::Network)),
         Item::action("Button test", Action::Open(View::ButtonTest)),
         Item::action("Refresh lab", Action::Lab),
         Item::action("Full refresh", Action::FullRefresh),
@@ -165,6 +167,8 @@ struct Ui {
     error: Label,
     /// The previous run's panic message, shown once at boot.
     crash: Option<heapless::String<120>>,
+    /// The Network screen's lines, kept up to date by the main loop.
+    net_lines: [Label; 4],
 }
 
 impl Ui {
@@ -252,6 +256,12 @@ impl Ui {
                 let _ = lines[3].push_str("OK: back");
                 src.title
             }
+            View::Network => {
+                for (dst, src) in lines.iter_mut().zip(&self.net_lines) {
+                    let _ = dst.push_str(src);
+                }
+                "Network"
+            }
             View::Crashed => {
                 let _ = lines[0].push_str("The last run crashed:");
                 if let Some(msg) = &self.crash {
@@ -287,7 +297,7 @@ impl Ui {
         };
         let back = matches!(
             view,
-            View::Info | View::ButtonTest | View::Failed(_) | View::Crashed
+            View::Info | View::Network | View::ButtonTest | View::Failed(_) | View::Crashed
         );
         let _ = view::draw_title(frame, t, title, back.then_some("OK: back"));
         let _ = view::draw_lines(frame, t, lines.iter().map(|l| l.as_str()));
@@ -341,7 +351,9 @@ impl Ui {
                     Effect::Redraw(Update::NewScreen)
                 }
                 // Info: Up/Down re-read the values.
-                Event::Up | Event::Down if view == View::Info => Effect::Redraw(Update::Change),
+                Event::Up | Event::Down if matches!(view, View::Info | View::Network) => {
+                    Effect::Redraw(Update::Change)
+                }
                 _ => Effect::None,
             };
         }
@@ -431,6 +443,37 @@ impl From<Result<remote::Net, Label>> for NetState {
     }
 }
 
+/// The Network screen: state, link and the last fetch's timings.
+#[cfg(screen_server)]
+fn net_lines(net: &NetState, up_ms: u64) -> [Label; 4] {
+    let mut l: [Label; 4] = Default::default();
+    match net {
+        NetState::Starting => {
+            let _ = l[0].push_str("Wi-Fi: starting...");
+        }
+        NetState::Up(n) => {
+            let _ = write!(
+                l[0],
+                "Wi-Fi up {}.{} s after boot",
+                up_ms / 1000,
+                up_ms % 1000 / 100
+            );
+            let _ = l[1].push_str(&n.link);
+            let _ = l[2].push_str("Last fetch:");
+            let _ = l[3].push_str(if n.last_fetch.is_empty() {
+                "-"
+            } else {
+                &n.last_fetch
+            });
+        }
+        NetState::Failed(why) => {
+            let _ = l[0].push_str("Wi-Fi failed:");
+            let _ = l[1].push_str(why);
+        }
+    }
+    l
+}
+
 /// The battery ADC, set up on the first read.
 enum BatteryAdc {
     Idle(
@@ -516,6 +559,8 @@ async fn main(spawner: Spawner) -> ! {
             embassy_futures::select::Either::Second(()) => NetState::Starting,
         }
     };
+    #[cfg(screen_server)]
+    let mut net_up_ms = now_ms();
     #[cfg(not(screen_server))]
     let _ = spawner;
     // The only other wake source is the timer, which this firmware does not set.
@@ -599,6 +644,7 @@ async fn main(spawner: Spawner) -> ! {
         bundle_sel: None,
         error: Label::new(),
         crash: crashed,
+        net_lines: Default::default(),
     };
     if let Some(msg) = &ui.crash {
         error!("previous run panicked: {msg}");
@@ -648,6 +694,7 @@ async fn main(spawner: Spawner) -> ! {
                     {
                         if let NetState::Starting = net {
                             net = NetState::from(net_start.as_mut().await);
+                            net_up_ms = now_ms();
                         }
                         let result = match &mut net {
                             NetState::Up(n) => n.fetch(src.id, &mut ui.bundle[..]).await,
@@ -691,6 +738,16 @@ async fn main(spawner: Spawner) -> ! {
             break off;
         }
         if let Some(update) = redraw {
+            #[cfg(screen_server)]
+            {
+                ui.net_lines = net_lines(&net, net_up_ms);
+            }
+            #[cfg(not(screen_server))]
+            {
+                ui.net_lines = Default::default();
+                let _ = ui.net_lines[0].push_str("No server configured");
+                let _ = ui.net_lines[1].push_str("(SCREEN_URL, see build.rs)");
+            }
             if ui.view == Some(View::Info) {
                 #[cfg(screen_server)]
                 let adc = matches!(net, NetState::Up(_));
@@ -713,6 +770,7 @@ async fn main(spawner: Spawner) -> ! {
             .await
             {
                 net = NetState::from(r);
+                net_up_ms = now_ms();
             }
         } else {
             Timer::after_millis(BUTTON_POLL_MS.into()).await;
