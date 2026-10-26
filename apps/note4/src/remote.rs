@@ -105,6 +105,7 @@ impl Net {
         );
         match resp.head.status {
             200 => Ok(resp.body_len),
+            400 => Err(reason(format_args!("not on the server yet (400)"))),
             401 => Err(reason(format_args!("server: key rejected (401)"))),
             status => Err(reason(format_args!("server: HTTP {status}"))),
         }
