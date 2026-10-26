@@ -14,10 +14,10 @@ test = false
 bench = false
 
 [dependencies]
-esp-hal.workspace = true
+# exception-handler turns CPU exceptions into panics, which src/crash.rs records.
+esp-hal = { workspace = true, features = ["exception-handler"] }
 esp-bootloader-esp-idf.workspace = true
 esp-alloc.workspace = true
-esp-backtrace = { workspace = true, features = ["panic-handler", "custom-halt"] }
 esp-println.workspace = true
 critical-section.workspace = true
 log.workspace = true

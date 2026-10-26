@@ -26,6 +26,7 @@
 
 use core::fmt::Write as _;
 
+mod crash;
 mod input;
 mod lab;
 #[cfg(screen_server)]
@@ -37,7 +38,6 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
 };
-use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
@@ -47,7 +47,7 @@ use esp_hal::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
     },
-    time::{Duration, Instant, Rate},
+    time::{Instant, Rate},
     timer::timg::TimerGroup,
 };
 use input::{ButtonDelay, Sampler, now_ms};
@@ -74,14 +74,6 @@ static SAMPLER: StaticCell<Sampler> = StaticCell::new();
 /// The last screen bundle from the server (a 10-row list is about 35 KB).
 static BUNDLE: ConstStaticCell<[u8; BUNDLE_MAX]> = ConstStaticCell::new([0; BUNDLE_MAX]);
 const BUNDLE_MAX: usize = 40 * 1024;
-
-/// After a panic: device off on battery; on USB retry after this long.
-const PANIC_RETRY: Duration = Duration::from_secs(30 * 60);
-
-#[unsafe(no_mangle)]
-fn custom_halt() -> ! {
-    power::halt_after_panic(PANIC_RETRY)
-}
 
 /// Partial refreshes before a full one. Ghosting was hard to see after many more.
 const MAX_PARTIALS: u16 = 16;
@@ -117,6 +109,8 @@ enum View {
     Failed(Source),
     Asleep,
     Off,
+    /// The previous run panicked; [`Ui::crash`] has the message.
+    Crashed,
 }
 
 const fn fetch(id: &'static str, title: &'static str) -> Action {
@@ -169,6 +163,8 @@ struct Ui {
     bundle_sel: Option<usize>,
     /// Why the last server screen failed.
     error: Label,
+    /// The previous run's panic message, shown once at boot.
+    crash: Option<heapless::String<120>>,
 }
 
 impl Ui {
@@ -256,6 +252,20 @@ impl Ui {
                 let _ = lines[3].push_str("OK: back");
                 src.title
             }
+            View::Crashed => {
+                let _ = lines[0].push_str("The last run crashed:");
+                if let Some(msg) = &self.crash {
+                    // 38 characters fit a row of the 10x20 font.
+                    let mut rest = msg.as_str();
+                    for line in lines.iter_mut().skip(1).take(4) {
+                        let cut = rest.char_indices().nth(38).map_or(rest.len(), |(i, _)| i);
+                        let _ = line.push_str(&rest[..cut]);
+                        rest = &rest[cut..];
+                    }
+                }
+                let _ = lines[5].push_str("OK: menu");
+                "ZECTRIX NOTE4"
+            }
             View::Asleep => {
                 let _ = lines[0].push_str("Asleep.");
                 let _ = lines[1].push_str("OK opens the menu.");
@@ -275,7 +285,10 @@ impl Ui {
                 "ZECTRIX NOTE4"
             }
         };
-        let back = matches!(view, View::Info | View::ButtonTest | View::Failed(_));
+        let back = matches!(
+            view,
+            View::Info | View::ButtonTest | View::Failed(_) | View::Crashed
+        );
         let _ = view::draw_title(frame, t, title, back.then_some("OK: back"));
         let _ = view::draw_lines(frame, t, lines.iter().map(|l| l.as_str()));
     }
@@ -472,6 +485,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(size: 112 * 1024);
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
+    let crashed = crash::take();
     // Wi-Fi starts at boot in the background, so it is usually up by the time a server
     // screen opens. The first poll initialises the radio before the panel is touched, as
     // on the NOTE4C.
@@ -485,10 +499,18 @@ async fn main(spawner: Spawner) -> ! {
             aes: p.AES,
         },
     ));
+    // After a crash, start nothing early: the crash may have been in the Wi-Fi start,
+    // and the message must reach the panel first.
     #[cfg(screen_server)]
-    let mut net = match embassy_futures::poll_once(net_start.as_mut()) {
-        core::task::Poll::Ready(r) => NetState::from(r),
-        core::task::Poll::Pending => NetState::Starting,
+    let net_early = crashed.is_none();
+    #[cfg(screen_server)]
+    let mut net = if !net_early {
+        NetState::Starting
+    } else {
+        match embassy_futures::poll_once(net_start.as_mut()) {
+            core::task::Poll::Ready(r) => NetState::from(r),
+            core::task::Poll::Pending => NetState::Starting,
+        }
     };
     #[cfg(not(screen_server))]
     let _ = spawner;
@@ -572,7 +594,12 @@ async fn main(spawner: Spawner) -> ! {
         bundle_len: 0,
         bundle_sel: None,
         error: Label::new(),
+        crash: crashed,
     };
+    if let Some(msg) = &ui.crash {
+        error!("previous run panicked: {msg}");
+        ui.view = Some(View::Crashed);
+    }
 
     // Buttons held at start (OK that woke us, Down that switched us on) count only after
     // they were released.
@@ -674,7 +701,7 @@ async fn main(spawner: Spawner) -> ! {
         }
         // Yields to the network tasks, and drives the Wi-Fi start while it runs.
         #[cfg(screen_server)]
-        if let NetState::Starting = net {
+        if net_early && let NetState::Starting = net {
             if let embassy_futures::select::Either::Second(r) = embassy_futures::select::select(
                 Timer::after_millis(BUTTON_POLL_MS.into()),
                 net_start.as_mut(),
