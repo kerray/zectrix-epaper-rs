@@ -1,0 +1,14 @@
+# Firmware target config. Cargo reads this when you build from this directory.
+include = ["esp-config.toml"]
+
+[target.xtensa-esp32s3-none-elf]
+# `cargo run` would use `espflash flash`, which also writes a bootloader. Do not use it on
+# a device whose factory firmware you want to keep; use `just flash <app>` instead.
+runner = ["sh", "-c", "echo 'cargo run is disabled: use `just flash <app>` (keeps the factory bootloader), see docs/FLASHING.md' >&2; exit 1"]
+
+[build]
+rustflags = ["-C", "link-arg=-nostartfiles", "-C", "link-arg=-Wl,--no-warn-rwx-segments"]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["alloc", "core"]

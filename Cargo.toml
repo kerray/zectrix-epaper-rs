@@ -1,9 +1,24 @@
 [workspace]
 resolver = "3"
-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "crates/zectrix-screen", "apps/note4", "apps/note4c"]
+members = [
+    "crates/ssd2683",
+    "crates/es8311",
+    "crates/zectrix-board",
+    "crates/zectrix-net",
+    "crates/zectrix-screen",
+    "apps/note4",
+    "apps/note4c",
+    "apps/audio",
+]
 # `cargo test` at the root runs the host-testable crates only. The firmware apps build
 # for Xtensa from their own directories (see justfile), which carry the target config.
-default-members = ["crates/ssd2683", "crates/zectrix-board", "crates/zectrix-net", "crates/zectrix-screen"]
+default-members = [
+    "crates/ssd2683",
+    "crates/es8311",
+    "crates/zectrix-board",
+    "crates/zectrix-net",
+    "crates/zectrix-screen",
+]
 
 [workspace.package]
 edition = "2024"
@@ -25,6 +40,7 @@ embedded-hal = "1.0"
 static_cell = "2.1.1"
 heapless = "0.9"
 ssd2683 = { path = "crates/ssd2683" }
+es8311 = { path = "crates/es8311" }
 zectrix-board = { path = "crates/zectrix-board" }
 zectrix-net = { path = "crates/zectrix-net" }
 zectrix-screen = { path = "crates/zectrix-screen" }

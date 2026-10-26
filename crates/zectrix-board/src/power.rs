@@ -1,4 +1,5 @@
-//! esp-hal glue: power latch, panel rail, battery ADC and deep sleep.
+//! esp-hal glue: power latch, panel rail, audio rail and speaker amplifier, battery ADC and
+//! deep sleep.
 //!
 //! The NOTE4 / NOTE4C stays powered on battery only while GPIO17 is high. Engage the
 //! latch first thing in `main` and keep it held, including through deep sleep. On USB
@@ -7,7 +8,7 @@
 use esp_hal::{
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
     gpio::{Event, Input, Level, Output, OutputConfig, WakeupConfig},
-    peripherals::{ADC1, GPIO4, GPIO6, GPIO17, LPWR},
+    peripherals::{ADC1, GPIO4, GPIO6, GPIO17, GPIO42, GPIO46, LPWR},
     rtc_cntl::sleep::{LowPower, RtcSleepConfig},
     time::{Duration, Instant},
 };
@@ -73,6 +74,62 @@ pub fn halt_after_panic(retry_after: Duration) -> ! {
     let mut low_power = LowPower::new(lpwr);
     low_power.set_wakeup_deadline(Instant::now() + retry_after);
     low_power.sleep_deep(RtcSleepConfig::deep())
+}
+
+/// The audio rail (GPIO42, `PA_PWR_EN`) and the speaker amplifier enable (GPIO46,
+/// `PA_CTRL`), both active high.
+///
+/// - The audio rail also powers the I2C pull-ups (R45/R46), so the ES8311, the RTC and
+///   the NFC chip only answer on I2C while it is on. Give the codec a few milliseconds
+///   after [`AudioPower::on`] before the first I2C transfer.
+/// - GPIO46 is a strapping pin: it must be low at reset. It is only driven here, after
+///   boot, starts low, and is held low through deep sleep by [`AudioPower::off_for_sleep`].
+pub struct AudioPower<'d> {
+    rail: Output<'d>,
+    amp: Output<'d>,
+}
+
+impl<'d> AudioPower<'d> {
+    /// Switch the audio rail on, speaker amplifier off. Releases any pad hold left from
+    /// deep sleep.
+    pub fn on(rail: GPIO42<'d>, amp: GPIO46<'d>) -> Self {
+        // `Output::new` releases a pad hold and then drives the new level.
+        let amp = Output::new(amp, Level::Low, OutputConfig::default());
+        let rail = Output::new(rail, Level::High, OutputConfig::default());
+        Self { rail, amp }
+    }
+
+    /// Speaker amplifier on or off. Keep it off while nothing plays: it hisses, and the
+    /// mic picks it up.
+    pub fn set_speaker(&mut self, on: bool) {
+        self.amp
+            .set_level(if on { Level::High } else { Level::Low });
+    }
+
+    pub fn speaker_is_on(&self) -> bool {
+        self.amp.is_set_high()
+    }
+
+    /// Amplifier off, then the rail off; both pads held low through deep sleep. Power
+    /// the codec down over I2C before this.
+    pub fn off_for_sleep(mut self) {
+        self.amp.set_low();
+        self.amp.set_pad_hold(true);
+        self.rail.set_low();
+        self.rail.set_pad_hold(true);
+    }
+}
+
+/// After a panic, before [`halt_after_panic`]: speaker amplifier and audio rail off and
+/// held low, so a crashed audio app does not leave the amplifier on during deep sleep.
+pub fn audio_off_after_panic() {
+    // SAFETY: the program is finished; nothing else will touch these pins again.
+    let (rail, amp) = unsafe { (GPIO42::steal(), GPIO46::steal()) };
+    AudioPower {
+        amp: Output::new(amp, Level::Low, OutputConfig::default()),
+        rail: Output::new(rail, Level::Low, OutputConfig::default()),
+    }
+    .off_for_sleep();
 }
 
 /// Battery voltage on GPIO4 (ADC1 channel 3) through the 2:1 divider.

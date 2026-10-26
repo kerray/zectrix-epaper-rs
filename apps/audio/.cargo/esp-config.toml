@@ -1,0 +1,3 @@
+# User/runtime configuration (esp-config).
+[env]
+ESP_LOG = "info"

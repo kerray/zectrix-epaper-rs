@@ -2,7 +2,7 @@
 name = "zectrix-board"
 version = "0.1.0"
 edition.workspace = true
-description = "Board support for the ZECTRIX NOTE4 / NOTE4C (ESP32-S3 N16R8, PCB V1.0): pin map, power latch, battery, buttons"
+description = "Board support for the ZECTRIX NOTE4 / NOTE4C (ESP32-S3 N16R8, PCB V1.0): pin map, power latch, battery, buttons, audio power"
 license.workspace = true
 repository.workspace = true
 publish = false

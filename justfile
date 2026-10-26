@@ -1,5 +1,6 @@
 # ZECTRIX NOTE4 / NOTE4C firmware tasks.   `just` lists them.
-# Apps: note4 (mono test card) · note4c (four-colour frame client).
+# Apps: note4 (mono menu) · note4c (four-colour frame client) · audio (mic/speaker
+# loopback, panel untouched, runs on either device).
 # See docs/FLASHING.md before touching a device.
 #
 # Another repo can reuse these recipes with `import 'path/to/zectrix-epaper-rs/justfile'`:
@@ -34,10 +35,10 @@ setup:
 # Host tests of the driver and board logic, host-crate clippy, format check.
 test:
     cd {{root}} && cargo test --locked
-    cd {{root}} && cargo clippy --locked --workspace --exclude note4 --exclude note4c --all-targets -- -D warnings
+    cd {{root}} && cargo clippy --locked --workspace --exclude note4 --exclude note4c --exclude audio --all-targets -- -D warnings
     cd {{root}} && cargo fmt --all -- --check
 
-# Build one app (note4 | note4c).
+# Build one app (note4 | note4c | audio).
 build app:
     cd {{root}}/apps/{{app}} && cargo build --locked --release
 
@@ -45,10 +46,12 @@ build app:
 clippy app:
     cd {{root}}/apps/{{app}} && cargo clippy --locked --release -- -D warnings
 
-# Build both apps, run tests and clippy (what CI does).
-check: test (build "note4") (build "note4c") (clippy "note4") (clippy "note4c")
+# Build all apps, run tests and clippy (what CI does).
+check: test (build "note4") (build "note4c") (build "audio") (clippy "note4") (clippy "note4c") (clippy "audio")
 
 # App image for the ota_0 slot of the factory partition table → target/<app>-app.bin
+# (audio uses the NOTE4C table: its 4032 K ota_0 is the smaller of the two, so the image
+# fits either device; ota_0 sits at 0x20000 in both).
 image app: (build app)
     espflash save-image --chip esp32s3 --flash-size 16mb \
       --partition-table {{root}}/partitions/{{ if app == "note4" { "note4-devkit-16m.csv" } else { "factory-16m.csv" } }} \
@@ -77,15 +80,17 @@ partitions backup:
     espflash partition-table $tmp; rm $tmp
 
 # Write the app to ota_0 (0x20000), verify it, blank otadata. Bootloader and ota_1 are kept.
-# Refuses unless a backup exists and the device's partition table is the one known for this app
-# (the NOTE4 and NOTE4C tables differ, so this also stops one panel's app reaching the other).
+# Refuses unless the device's partition table is one known for this app and a backup of that
+# device exists. The NOTE4 and NOTE4C tables differ, so this also stops one panel's app
+# reaching the other; `audio` never drives the panel and accepts either table.
 flash app: (image app)
-    ls backups/{{app}}-*-a.bin >/dev/null 2>&1 || { echo "No backups/{{app}}-*-a.bin. Run: just backup {{app}}"; exit 1; }
     tmp=$(mktemp); espflash read-flash -p {{port}} -c esp32s3 --after no-reset 0x8000 0x1000 $tmp >/dev/null; \
     h=$(sha256sum $tmp | cut -d' ' -f1); rm $tmp; \
-    want={{ if app == "note4" { note4_table_sha256 } else { note4c_table_sha256 } }}; \
-    [ "$h" = "$want" ] || { echo "Partition table on the device ($h) is not the {{app}} table. Wrong device? See docs/FLASHING.md step 2."; exit 1; }; \
-    echo "Partition table on the device = {{app}} table."
+    case "$h" in {{note4_table_sha256}}) dev=note4;; {{note4c_table_sha256}}) dev=note4c;; *) dev=unknown;; esac; \
+    case "{{app}}" in audio) fits=$([ "$dev" != unknown ] && echo yes || true);; *) fits=$([ "$dev" = "{{app}}" ] && echo yes || true);; esac; \
+    [ "$fits" = yes ] || { echo "Partition table on the device ($h, $dev) is not a {{app}} table. Wrong device? See docs/FLASHING.md step 2."; exit 1; }; \
+    ls backups/$dev-*-a.bin >/dev/null 2>&1 || { echo "No backups/$dev-*-a.bin. Run: just backup $dev"; exit 1; }; \
+    echo "Partition table on the device = $dev table; backup found."
     @echo "About to write {{app}} to 0x20000 and erase otadata (0xd000) on {{port}}."
     @echo "Anything else stops here; the chip then stays in the bootloader until you press RESET."
     @read -p "Type the app name to continue: " ans && [ "$ans" = "{{app}}" ]

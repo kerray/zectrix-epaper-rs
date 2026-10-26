@@ -25,8 +25,8 @@ jobs:
           version: 1.97.0.0  # same as esp_toolchain in the justfile
           buildtargets: esp32s3
           ldproxy: false
-      - run: cargo test --locked --workspace --exclude note4 --exclude note4c
-      - run: cargo clippy --locked --workspace --exclude note4 --exclude note4c --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --exclude note4 --exclude note4c --exclude audio
+      - run: cargo clippy --locked --workspace --exclude note4 --exclude note4c --exclude audio --all-targets -- -D warnings
       - run: cargo fmt --all -- --check
 
   firmware:
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        app: [note4, note4c]
+        app: [note4, note4c, audio]
     steps:
       - uses: actions/checkout@v4
       - uses: esp-rs/xtensa-toolchain@v1.7.0

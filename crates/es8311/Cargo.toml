@@ -1,0 +1,11 @@
+[package]
+name = "es8311"
+version = "0.1.0"
+edition.workspace = true
+description = "no_std driver for the Everest Semiconductor ES8311 mono audio codec over embedded-hal 1.0 I2C"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+embedded-hal.workspace = true

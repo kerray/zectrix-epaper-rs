@@ -5,7 +5,8 @@ Rust `no_std` firmware and drivers for two ZECTRIX e-paper devkits built on the 
 | App | Device | Panel | What it does |
 | --- | --- | --- | --- |
 | [`apps/note4c`](apps/note4c) | NOTE4C Devkit | 4.2" 400×300, black/white/yellow/red | **frame client**: wakes, fetches a server-rendered frame over HTTPS, shows it, deep-sleeps until the server's `X-Next-Refresh` |
-| [`apps/note4`](apps/note4) | NOTE4 Developer Kit | 4.2" 400×300, black/white | test card, OK opens a partial-refresh lab screen; deep sleep, wake on OK / 30 min (frame client and interactive screens planned) |
+| [`apps/note4`](apps/note4) | NOTE4 Developer Kit | 4.2" 400×300, black/white | **on-device menu** with partial refresh (~0.8 s per change): submenus with Back on top, device info, button test, partial-refresh lab; deep sleep after 60 s, wake on OK (server screens planned) |
+| [`apps/audio`](apps/audio) | either | not used | **audio loopback** (voice V1): hold OK to record from the mic, release to hear it back; beeps; see [AUDIO.md](docs/AUDIO.md) |
 
 Both boards are the same V1.0 hardware: ESP32-S3 N16R8 and a Solomon **SSD2683** panel
 controller. Only the panel differs. The devices stay thin: rendering happens on a server you
@@ -22,12 +23,14 @@ Not affiliated with ZECTRIX. "ZECTRIX", "NOTE4" and "NOTE4C" name the hardware t
 ## Layout
 
 ```
-crates/ssd2683        SSD2683 driver: 4-colour + mono full refresh, embedded-graphics frames (host-tested)
-crates/zectrix-board  pin map, battery maths (host-tested); `hal` feature: power latch, ADC, deep sleep
+crates/ssd2683        SSD2683 driver: 4-colour + mono full refresh, mono partial refresh, embedded-graphics frames (host-tested)
+crates/es8311         ES8311 audio codec driver over embedded-hal I2C (host-tested)
+crates/zectrix-board  pin map, battery maths, beeps (host-tested); `hal` feature: power latch, audio power, ADC, deep sleep
 crates/zectrix-net    Wi-Fi station, HTTPS GET (mbedtls-rs), HTTP/1.x head + URL parser, dotenv reader (host-tested)
-crates/zectrix-screen NOTE4 interactive screens: bundle/patch parser, cursor, refresh policy, buttons, session (host-tested)
+crates/zectrix-screen NOTE4 interactive screens: menus, drawing, partial-refresh presenter, bundle/patch parser, refresh policy, buttons, session (host-tested)
 apps/note4c           NOTE4C frame client
-apps/note4            NOTE4 test card
+apps/note4            NOTE4 on-device menu with partial refresh
+apps/audio            mic → PSRAM → speaker loopback (both devices, panel untouched)
 partitions/           factory 16 MB partition tables of the NOTE4C and the NOTE4 devkit
 docs/                 hardware, flashing, frame protocol, roadmap, research notes
 tools/                reference-repo list, vendor file list (URLs + SHA-256), fetch scripts, screen-bundle.py
