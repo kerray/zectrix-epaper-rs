@@ -34,6 +34,7 @@ esp-rtos.workspace = true
 esp-radio.workspace = true
 embassy-executor.workspace = true
 embassy-time.workspace = true
+embassy-futures.workspace = true
 embassy-net.workspace = true
 mbedtls-rs.workspace = true
 tinyrlibc.workspace = true

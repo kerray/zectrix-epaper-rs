@@ -252,6 +252,7 @@ impl Ui {
             View::Failed(src) | View::Server(src) => {
                 let _ = lines[0].push_str("Could not load:");
                 let _ = lines[1].push_str(&self.error);
+                let _ = write!(lines[2], "free heap {} KB", esp_alloc::HEAP.free() / 1024);
                 let _ = lines[3].push_str("OK: back");
                 src.title
             }
@@ -396,6 +397,27 @@ impl Ui {
     }
 }
 
+/// The background Wi-Fi start.
+#[cfg(screen_server)]
+enum NetState {
+    Starting,
+    Up(remote::Net),
+    Failed(Label),
+}
+
+#[cfg(screen_server)]
+impl From<Result<remote::Net, Label>> for NetState {
+    fn from(r: Result<remote::Net, Label>) -> Self {
+        match r {
+            Ok(net) => NetState::Up(net),
+            Err(why) => {
+                warn!("network: {why}");
+                NetState::Failed(why)
+            }
+        }
+    }
+}
+
 /// The battery ADC, set up on the first read.
 enum BatteryAdc {
     Idle(
@@ -447,11 +469,14 @@ async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
     // Wi-Fi and mbedtls allocate; the bootloader's RAM is free after boot.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 96 * 1024);
+    esp_alloc::heap_allocator!(size: 112 * 1024);
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
+    // Wi-Fi starts at boot in the background, so it is usually up by the time a server
+    // screen opens. The first poll initialises the radio before the panel is touched, as
+    // on the NOTE4C.
     #[cfg(screen_server)]
-    let mut remote = remote::Remote::new(
+    let mut net_start = core::pin::pin!(remote::start(
         spawner,
         remote::Parts {
             wifi: p.WIFI,
@@ -459,7 +484,12 @@ async fn main(spawner: Spawner) -> ! {
             rsa: p.RSA,
             aes: p.AES,
         },
-    );
+    ));
+    #[cfg(screen_server)]
+    let mut net = match embassy_futures::poll_once(net_start.as_mut()) {
+        core::task::Poll::Ready(r) => NetState::from(r),
+        core::task::Poll::Pending => NetState::Starting,
+    };
     #[cfg(not(screen_server))]
     let _ = spawner;
     // The only other wake source is the timer, which this firmware does not set.
@@ -585,7 +615,14 @@ async fn main(spawner: Spawner) -> ! {
                     show(&mut ui, &mut epd, frame, shadow, &status, Update::NewScreen);
                     #[cfg(screen_server)]
                     {
-                        let result = remote.fetch(src.id, &mut ui.bundle[..]).await;
+                        if let NetState::Starting = net {
+                            net = NetState::from(net_start.as_mut().await);
+                        }
+                        let result = match &mut net {
+                            NetState::Up(n) => n.fetch(src.id, &mut ui.bundle[..]).await,
+                            NetState::Failed(why) => Err(why.clone()),
+                            NetState::Starting => unreachable!("awaited above"),
+                        };
                         ui.loaded(src, result);
                     }
                     #[cfg(not(screen_server))]
@@ -625,7 +662,7 @@ async fn main(spawner: Spawner) -> ! {
         if let Some(update) = redraw {
             if ui.view == Some(View::Info) {
                 #[cfg(screen_server)]
-                let adc = remote.connected();
+                let adc = matches!(net, NetState::Up(_));
                 #[cfg(not(screen_server))]
                 let adc = true;
                 status = read_status(&mut battery, adc);
@@ -635,7 +672,21 @@ async fn main(spawner: Spawner) -> ! {
         if session.should_sleep(t) {
             break false;
         }
-        // Yields to the network tasks.
+        // Yields to the network tasks, and drives the Wi-Fi start while it runs.
+        #[cfg(screen_server)]
+        if let NetState::Starting = net {
+            if let embassy_futures::select::Either::Second(r) = embassy_futures::select::select(
+                Timer::after_millis(BUTTON_POLL_MS.into()),
+                net_start.as_mut(),
+            )
+            .await
+            {
+                net = NetState::from(r);
+            }
+        } else {
+            Timer::after_millis(BUTTON_POLL_MS.into()).await;
+        }
+        #[cfg(not(screen_server))]
         Timer::after_millis(BUTTON_POLL_MS.into()).await;
     };
 

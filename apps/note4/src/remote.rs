@@ -1,8 +1,8 @@
 //! Server screens: fetching screen bundles over HTTPS (docs/INTERACTIVE.md, "Protocol").
 //!
-//! Built only with `cfg(screen_server)` (build.rs: `SCREEN_URL` is set). Wi-Fi and TLS
-//! start the first time a server screen opens and stay up for the rest of the session;
-//! the device sleeps soon after anyway.
+//! Built only with `cfg(screen_server)` (build.rs: `SCREEN_URL` is set). [`start`] joins
+//! Wi-Fi and sets up TLS; the app runs it in the background from boot, so the network is
+//! usually up by the time a server screen opens. It stays up until the device sleeps.
 
 use core::fmt::Write as _;
 
@@ -63,38 +63,15 @@ pub struct Parts {
     pub aes: AES<'static>,
 }
 
-struct Net {
+pub struct Net {
     stack: embassy_net::Stack<'static>,
     tls: Tls<'static>,
     _hooks: EspHooksGuard<'static>,
 }
 
-pub struct Remote {
-    spawner: Spawner,
-    parts: Option<Parts>,
-    net: Option<Net>,
-    /// Why networking failed for good (Wi-Fi can be started only once per boot).
-    failed: Option<Label>,
-}
-
-impl Remote {
-    pub fn new(spawner: Spawner, parts: Parts) -> Self {
-        Self {
-            spawner,
-            parts: Some(parts),
-            net: None,
-            failed: None,
-        }
-    }
-
-    /// Wi-Fi is up (so the battery ADC may be read again, see docs/ROADMAP.md).
-    pub fn connected(&self) -> bool {
-        self.net.is_some()
-    }
-
+impl Net {
     /// Fetch screen `id` into `body`. Returns the bundle length, or a one-line reason.
     pub async fn fetch(&mut self, id: &str, body: &mut [u8]) -> Result<usize, Label> {
-        let net = self.connect().await?;
         let mut path: heapless::String<{ zectrix_net::http::REQUEST_MAX }> =
             heapless::String::new();
         if write!(path, "{SCREEN_PATH}{SCREEN_SEP}screen={id}").is_err() || id.len() > SCREEN_ID_MAX
@@ -112,7 +89,7 @@ impl Remote {
         let t = Instant::now();
         let resp = match with_timeout(
             FETCH_TIMEOUT,
-            https::get(net.stack, net.tls.reference(), ep, headers, body),
+            https::get(self.stack, self.tls.reference(), ep, headers, body),
         )
         .await
         {
@@ -132,35 +109,12 @@ impl Remote {
             status => Err(reason(format_args!("server: HTTP {status}"))),
         }
     }
+}
 
-    async fn connect(&mut self) -> Result<&mut Net, Label> {
-        if let Some(why) = &self.failed {
-            return Err(why.clone());
-        }
-        if self.net.is_none() {
-            match self.start().await {
-                Ok(net) => self.net = Some(net),
-                Err(why) => {
-                    self.failed = Some(why.clone());
-                    return Err(why);
-                }
-            }
-        }
-        Ok(self.net.as_mut().expect("just connected"))
-    }
-
-    async fn start(&mut self) -> Result<Net, Label> {
-        let parts = self
-            .parts
-            .take()
-            .ok_or_else(|| reason(format_args!("no radio")))?;
-        let link = wifi::connect(
-            self.spawner,
-            parts.wifi,
-            WIFI_SSID,
-            WIFI_PASSWORD,
-            WIFI_TIMEOUT,
-        )
+/// Join Wi-Fi and set up TLS. Wi-Fi can be started once per boot, so a failure is final
+/// until the next wake.
+pub async fn start(spawner: Spawner, parts: Parts) -> Result<Net, Label> {
+    let link = wifi::connect(spawner, parts.wifi, WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT)
         .await
         .map_err(|e| match e {
             wifi::WifiError::Associate(sv) => match (sv.best, sv.last_reason) {
@@ -171,6 +125,7 @@ impl Remote {
                     "Wi-Fi ch{ch} {rssi}dBm: no join x{}",
                     sv.attempts
                 )),
+                (None, _) if sv.scan_failed => reason(format_args!("Wi-Fi: scan failed")),
                 (None, _) => reason(format_args!("Wi-Fi: SSID not seen ({} APs)", sv.total)),
             },
             wifi::WifiError::Dhcp(sv) => reason(format_args!(
@@ -180,33 +135,32 @@ impl Remote {
             )),
             e => reason(format_args!("Wi-Fi: {e:?}")),
         })?;
-        info!(
-            "wifi: {} ch{} {} dBm, assoc {} ms, dhcp {} ms",
-            link.ip,
-            link.channel,
-            link.rssi.unwrap_or(0),
-            link.associate_ms,
-            link.dhcp_ms
-        );
-        // The running radio is the entropy source (no ADC TrngSource, see wifi::connect).
-        let trng = Trng::try_new().map_err(|_| reason(format_args!("TRNG: no entropy")))?;
-        let tls = Tls::new(TRNG.init(trng)).map_err(|e| reason(format_args!("TLS: {e:?}")))?;
-        // Hardware SHA/RSA/AES, as on the NOTE4C (software RSA-4096 stalls TCP).
-        let accel = ACCEL.init(
-            EspAccel::new()
-                .with_sha(parts.sha)
-                .with_rsa(parts.rsa)
-                .with_aes(parts.aes),
-        );
-        let queue = QUEUE.init(accel.start());
-        // SAFETY: the queue is 'static, so it outlives every TLS session.
-        let hooks = unsafe { queue.hook() };
-        Ok(Net {
-            stack: link.stack,
-            tls,
-            _hooks: hooks,
-        })
-    }
+    info!(
+        "wifi: {} ch{} {} dBm, assoc {} ms, dhcp {} ms",
+        link.ip,
+        link.channel,
+        link.rssi.unwrap_or(0),
+        link.associate_ms,
+        link.dhcp_ms
+    );
+    // The running radio is the entropy source (no ADC TrngSource, see wifi::connect).
+    let trng = Trng::try_new().map_err(|_| reason(format_args!("TRNG: no entropy")))?;
+    let tls = Tls::new(TRNG.init(trng)).map_err(|e| reason(format_args!("TLS: {e:?}")))?;
+    // Hardware SHA/RSA/AES, as on the NOTE4C (software RSA-4096 stalls TCP).
+    let accel = ACCEL.init(
+        EspAccel::new()
+            .with_sha(parts.sha)
+            .with_rsa(parts.rsa)
+            .with_aes(parts.aes),
+    );
+    let queue = QUEUE.init(accel.start());
+    // SAFETY: the queue is 'static, so it outlives every TLS session.
+    let hooks = unsafe { queue.hook() };
+    Ok(Net {
+        stack: link.stack,
+        tls,
+        _hooks: hooks,
+    })
 }
 
 fn reason(args: core::fmt::Arguments<'_>) -> Label {

@@ -49,6 +49,8 @@ pub struct Survey {
     /// Access points of any SSID in the scan.
     pub total: u8,
     pub attempts: u8,
+    /// The scan itself failed (so `total` = 0 says nothing about the air).
+    pub scan_failed: bool,
     /// Reason the access point gave for the last failed attempt.
     pub last_reason: Option<DisconnectReason>,
     /// After association: signal in dBm, whether embassy-net saw the link come up, and
@@ -145,7 +147,10 @@ pub async fn connect(
                 survey.total, survey.matches, survey.best
             );
         }
-        Err(e) => warn!("wifi: scan failed: {e:?}"),
+        Err(e) => {
+            survey.scan_failed = true;
+            warn!("wifi: scan failed: {e:?}");
+        }
     }
 
     let attempt = with_timeout(timeout, async {

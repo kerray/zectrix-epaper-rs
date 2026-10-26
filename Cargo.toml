@@ -49,6 +49,7 @@ esp-rtos = { version = "0.4.0", features = ["esp32s3", "embassy", "esp-radio", "
 esp-radio = { version = "=1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc", "unstable", "log-04"] }
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.0", features = ["log"] }
+embassy-futures = "0.1.2"
 embassy-net = { version = "0.9.1", features = ["proto-ipv4", "medium-ethernet", "dhcpv4", "tcp", "dns", "log"] }
 mbedtls-rs = { version = "0.3.0", features = ["esp32s3", "embassy-time", "log"] }
 embassy-net-driver = "0.2.0"
